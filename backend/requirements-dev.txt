@@ -1,0 +1,21 @@
+-r requirements.txt
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+httpx==0.28.1
+# NOTE: testcontainers core only. The testcontainers-postgres helper package
+# (0.0.1rc1) is incompatible with testcontainers 4.9.0 — tests/conftest.py
+# builds the Postgres container via core DockerContainer instead.
+testcontainers==4.9.0
+factory-boy==3.3.1
+Faker==33.1.0
+
+# Linting / type checking
+ruff==0.8.6
+mypy==1.13.0
+types-redis==4.6.0.20241004
+
+# Development utilities
+psycopg2-binary==2.9.10  # for Alembic sync migrations in dev
