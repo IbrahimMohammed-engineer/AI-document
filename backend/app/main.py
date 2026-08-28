@@ -24,6 +24,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import RequestIdMiddleware, setup_logging
 from app.infrastructure.database import close_db, init_db
 from app.infrastructure.embeddings import init_embedding_provider
+from app.infrastructure.llm import init_llm_provider
 from app.infrastructure.queue import close_queue_pool, init_queue_pool
 from app.infrastructure.reranker import init_reranker_provider
 from app.infrastructure.redis import close_redis, init_redis
@@ -125,6 +126,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Non-fatal on startup — a reranker misconfiguration degrades
         # ordering (fused fallback), it never blocks the application.
 
+    # Initialize LLM provider (Phase 9) — the /ask endpoint surfaces a
+    # typed unavailable state when this is missing; startup stays unblocked.
+    try:
+        llm = init_llm_provider()
+        logger.info(
+            "LLM provider initialized",
+            extra={
+                "provider": settings.llm_provider,
+                "model": settings.llm_model,
+                "ready": llm is not None,
+            },
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to initialize LLM provider: %s",
+            exc,
+            extra={"provider": settings.llm_provider},
+        )
+        # Non-fatal on startup — questions will fail with a typed,
+        # retryable SSE error until the provider is configured.
+
     logger.info("All infrastructure initialized — application ready.")
     yield
 
@@ -187,6 +209,10 @@ def create_app() -> FastAPI:
     # Phase 7/8 — Search (chunk debug tooling lives on the documents router)
     from app.api.search import router as search_router
     app.include_router(search_router)
+
+    # Phase 9 — Ask AI (standalone RAG pipeline, SSE)
+    from app.api.ask import router as ask_router
+    app.include_router(ask_router)
 
     return app
 

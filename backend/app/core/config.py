@@ -111,8 +111,43 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
-    llm_provider: Literal["openai", "anthropic"] = "openai"
+    llm_provider: Literal["openai", "anthropic", "stub"] = "openai"
     llm_model: str = "gpt-4o-mini"
+
+    # ─── LLM generation (Phase 9) ─────────────────────────────────────────────
+    # Per-attempt timeouts (Backend §51): ~30 s generation, ~5 s fast
+    # classification/rewriting calls.  2 attempts, transient-only (4xx never
+    # retried); after N consecutive failures the circuit breaker
+    # short-circuits for a cooldown instead of paying for doomed calls.
+    llm_generation_timeout_seconds: float = 30.0
+    llm_fast_timeout_seconds: float = 5.0
+    llm_max_retries: int = 2
+    llm_circuit_breaker_threshold: int = 5
+    llm_circuit_breaker_cooldown_seconds: int = 60
+    # Factual-grounding task, not creative generation — low temperature
+    # measurably reduces embellishment beyond evidence (Backend §34).
+    llm_generation_temperature: float = 0.1
+    # Bounded per response (600–1000 documented band) — cost control + the
+    # product favors concise cited answers (Backend §34).
+    llm_generation_max_tokens: int = 800
+    # Bounded recent history (turns; the generator consumes the last N*2
+    # messages) — same rationale as the rewriter's bounded window (Backend §28).
+    llm_history_turns: int = 2
+
+    # ─── Context assembly + query rewriting (Phase 9) ─────────────────────────
+    # Fixed context token budget for SOURCE content (documented 4,000–6,000
+    # band; Backend §33) — sources are added in relevance order until it is
+    # reached; the LLM call is never made with an unbounded context.
+    context_token_budget: int = 5000
+    # Rewriter trigger heuristic (Backend §28): messages with at most this
+    # many words are considered potentially context-dependent (prior context
+    # existing); longer messages trigger only on demonstrative markers.
+    rewriter_trigger_max_words: int = 12
+    # Drift guard floor: cosine similarity between the original message and
+    # the rewrite below this falls back to the raw message (Backend §28).
+    rewriter_similarity_floor: float = 0.5
+    # Final sources targeted for context (the documented top 5–8, Backend §31).
+    rag_top_k_default: int = 8
 
     reranker_provider: Literal["cohere", "stub", "none"] = "none"
     reranker_model: str = "rerank-v3.5"

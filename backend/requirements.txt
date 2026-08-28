@@ -28,3 +28,6 @@ pgvector==0.3.6
 # Phase 8 - Hybrid Search + Reranking (lazy-imported; only required when
 # reranker_provider='cohere' - 'none'/'stub' never touch this SDK)
 cohere==5.13.4
+# Phase 9 - LLM generation (lazy-imported; only required when
+# llm_provider='anthropic' - openai/stub never touch this SDK)
+anthropic==0.42.0
