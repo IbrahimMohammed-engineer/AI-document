@@ -21,9 +21,8 @@ import sys
 import time
 import uuid
 from contextvars import ContextVar
-from typing import Awaitable, Callable
+from typing import Callable
 
-from fastapi import Request, Response
 
 # ─── Correlation ID context var ───────────────────────────────────────────────
 # This is the single source of truth for the current request's correlation ID.

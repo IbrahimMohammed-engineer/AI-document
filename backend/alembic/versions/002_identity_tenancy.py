@@ -20,11 +20,10 @@ Revision ID: 002
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import JSONB, UUID, INET
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision: str = "002"
 down_revision: str | None = "001"

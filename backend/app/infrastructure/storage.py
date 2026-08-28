@@ -24,6 +24,17 @@ from typing import AsyncIterator
 logger = logging.getLogger(__name__)
 
 
+class StorageObjectMissingError(Exception):
+    """Raised by `stat()` when the requested object does not exist.
+
+    Job handlers translate this into a deterministic job failure — the
+    upload's bytes never made it to storage (or were removed out-of-band).
+    """
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 # ── Abstract interface (unchanged from Phase 0 stub) ──────────────────────────
 
 class ObjectStorageProvider(ABC):
@@ -81,6 +92,15 @@ class ObjectStorageProvider(ABC):
     @abstractmethod
     async def exists(self, key: str) -> bool:
         """Return True if the object exists."""
+        ...
+
+    @abstractmethod
+    async def stat(self, key: str) -> dict:
+        """Return object metadata: {"size": int, "content_type": str | None}.
+
+        Raises StorageObjectMissingError if the object does not exist.
+        Used by job handlers that must verify durable state (Phase 4).
+        """
         ...
 
 
@@ -221,14 +241,27 @@ class S3StorageProvider(ObjectStorageProvider):
     async def exists(self, key: str) -> bool:
         """Return True if the object exists in S3/MinIO."""
         try:
-            await self._run_sync(
+            await self.stat(key)
+            return True
+        except StorageObjectMissingError:
+            return False
+
+    async def stat(self, key: str) -> dict:
+        """Return object metadata (size / content type) via HEAD."""
+        try:
+            head = await self._run_sync(
                 self._client.head_object,
                 Bucket=self._bucket,
                 Key=key,
             )
-            return True
-        except Exception:
-            return False
+        except Exception as exc:
+            raise StorageObjectMissingError(
+                f"Object not found in storage: {key}"
+            ) from exc
+        return {
+            "size": int(head.get("ContentLength", 0)),
+            "content_type": head.get("ContentType"),
+        }
 
 
 # ── Module-level provider singleton ──────────────────────────────────────────

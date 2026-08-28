@@ -4,10 +4,14 @@ FROM python:3.11-slim AS base
 WORKDIR /app
 
 # Install system dependencies
+# tesseract-ocr + eng data: local OCR engine for the TesseractOCRProvider
+# (Phase 5 dev/fallback — cloud OCR providers need no system packages)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
     curl \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

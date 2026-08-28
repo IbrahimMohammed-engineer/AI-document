@@ -40,6 +40,9 @@ class AuditAction:
     COLLECTION_DOCUMENT_ADDED = "COLLECTION_DOCUMENT_ADDED"
     COLLECTION_DOCUMENT_REMOVED = "COLLECTION_DOCUMENT_REMOVED"
 
+    # ── Processing events (Phase 4) ───────────────────────────────────────────
+    PROCESSING_RETRIED = "PROCESSING_RETRIED"
+
 
 class AuditLogger:
     @staticmethod

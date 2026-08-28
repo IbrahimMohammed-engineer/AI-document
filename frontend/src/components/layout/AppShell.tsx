@@ -9,6 +9,7 @@
  */
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
+import { ProcessingIndicator } from '@/features/documents'
 
 interface NavItem {
   to: string
@@ -99,6 +100,8 @@ export function AppShell() {
       <div className="app-main">
         <header className="app-header">
           <div style={{ flex: 1 }} />
+          {/* Phase 4 — org-wide active processing jobs (FE §5.2) */}
+          {currentUser && <ProcessingIndicator />}
           <div className="header-user">
             {currentUser && (
               <>

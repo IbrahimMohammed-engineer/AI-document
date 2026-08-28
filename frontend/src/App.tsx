@@ -19,6 +19,7 @@ import {
   RegisterPage,
   ResetPasswordPage,
 } from '@/features/auth'
+import { DocumentWorkspace } from '@/features/documents'
 
 // ── Placeholder page components ───────────────────────────────────────────────
 // These will be replaced with full implementations in later phases.
@@ -189,7 +190,7 @@ export function App() {
         <Route index element={<Navigate to="/app/dashboard" replace />} />
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="documents" element={<PlaceholderPage title="Documents" description="Document library — Phase 3" />} />
-        <Route path="documents/:id" element={<PlaceholderPage title="Document Workspace" description="Document details, versions, summary — Phase 3" />} />
+        <Route path="documents/:id" element={<DocumentWorkspace />} />
         <Route path="ask" element={<PlaceholderPage title="Ask AI" description="RAG-powered Q&A — Phase 9" />} />
         <Route path="ask/:conversationId" element={<PlaceholderPage title="Conversation" description="AI Chat with citation rendering — Phase 9" />} />
         <Route path="search" element={<PlaceholderPage title="Search" description="Hybrid semantic + keyword search — Phase 8" />} />

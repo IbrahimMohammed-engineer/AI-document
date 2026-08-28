@@ -12,14 +12,18 @@ Endpoints:
     POST   /documents                         — upload (new doc or new version)
     GET    /documents                         — list with filters / pagination
     POST   /documents/bulk                    — bulk action (must come before /{id})
+    GET    /documents/processing              — org-wide active jobs (Phase 4)
     GET    /documents/{id}                    — document detail
     PATCH  /documents/{id}                    — metadata update
     DELETE /documents/{id}                    — soft delete
     POST   /documents/{id}/restore            — restore soft-deleted doc
     GET    /documents/{id}/versions           — version history
     GET    /documents/{id}/download           — issue signed URL
-    GET    /documents/{id}/status             — processing status
-    POST   /documents/{id}/retry              — stub (active from Phase 4)
+    GET    /documents/{id}/status             — processing status (polling)
+    GET    /documents/{id}/pages              — extracted pages text/OCR (Phase 5)
+    GET    /documents/{id}/toc                — section tree for the TOC panel (Phase 6)
+    GET    /documents/{id}/chunks             — chunks with provenance (debug, Phase 6)
+    POST   /documents/{id}/retry              — retry failed stage (Phase 4)
 
   Collections:
     GET    /collections                       — list collections
@@ -36,7 +40,8 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Annotated, Optional
+from typing import Optional
+from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -57,16 +62,21 @@ from app.schemas.document import (
     CollectionDocumentRequest,
     CollectionListResponse,
     CollectionResponse,
+    DocumentChunksResponse,
     DocumentListResponse,
     DocumentMetadataUpdate,
+    DocumentPagesResponse,
     DocumentResponse,
     DocumentStatusResponse,
+    DocumentTocResponse,
     DocumentUploadResponse,
     DocumentVersionDetail,
     DownloadUrlResponse,
 )
+from app.schemas.processing import ProcessingListResponse, DocumentRetryResponse
 from app.services.collection_service import CollectionService
 from app.services.document_service import DocumentService
+from app.services.job_service import JobService
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +194,32 @@ async def bulk_action(
         access_level=payload.access_level,
         db=db,
         request=request,
+    )
+
+
+# ─── Org-wide active processing jobs (Phase 4) ────────────────────────────────
+# IMPORTANT: /processing must come BEFORE /{document_id} so FastAPI does not
+# try to interpret the literal string "processing" as a UUID path parameter.
+
+@router.get(
+    "/processing",
+    response_model=ProcessingListResponse,
+    summary="Org-wide active processing jobs (header indicator widget)",
+)
+async def list_processing_jobs(
+    db: DbSession,
+    user: User = Depends(require_permission("document:read")),
+    limit: int = Query(100, ge=1, le=500),
+) -> ProcessingListResponse:
+    """All PENDING/PROCESSING/RETRYING jobs in the organization.
+
+    Polled by the global header processing indicator (FE §5.2); SSE arrives
+    in Phase 11.
+    """
+    return await JobService.list_org_processing(
+        organization_id=user.organization_id,
+        db=db,
+        limit=limit,
     )
 
 
@@ -333,35 +369,128 @@ async def get_document_status(
     db: DbSession,
     user: User = Depends(require_permission("document:read")),
 ) -> DocumentStatusResponse:
-    return await DocumentService.get_document_status(
+    """Polling snapshot: `{ status, currentStep, progress, errorMessage? }` plus
+    live job detail. SSE upgrade arrives in Phase 11 (FE §11)."""
+    return await JobService.get_document_processing_status(
         document_id=document_id,
         organization_id=user.organization_id,
         db=db,
     )
 
 
-# ─── Retry stub (Phase 4 wires real logic) ────────────────────────────────────
+# ─── Extracted pages (Phase 5) ────────────────────────────────────────────────
+
+@router.get(
+    "/{document_id}/pages",
+    response_model=DocumentPagesResponse,
+    summary="Extracted page text + OCR flags for one version",
+)
+async def get_document_pages(
+    document_id: str,
+    db: DbSession,
+    user: User = Depends(require_permission("document:read")),
+    version: Optional[int] = Query(None, description="Version number (omit for latest)"),
+    offset: int = Query(0, ge=0, alias="offset"),
+    limit: int = Query(100, ge=1, le=500),
+) -> DocumentPagesResponse:
+    """Page-level extraction results (workspace/debug tooling).
+
+    Returns pages persisted so far — safe to read mid-extraction (shows
+    partial progress). `ocrFailed` per page drives the partial-processing
+    warning in the workspace.
+    """
+    return await DocumentService.get_document_pages(
+        document_id=document_id,
+        organization_id=user.organization_id,
+        version_number=version,
+        offset=offset,
+        limit=limit,
+        db=db,
+    )
+
+
+# ─── Table of contents (Phase 6) ──────────────────────────────────────────────
+
+@router.get(
+    "/{document_id}/toc",
+    response_model=DocumentTocResponse,
+    summary="Section tree for one version (workspace TOC panel)",
+)
+async def get_document_toc(
+    document_id: str,
+    db: DbSession,
+    user: User = Depends(require_permission("document:read")),
+    version: Optional[int] = Query(None, description="Version number (omit for latest)"),
+) -> DocumentTocResponse:
+    """Hierarchical table of contents detected during chunking (Phase 6).
+
+    An empty `items` list is the explicit "No structure detected" state
+    (FE §6.5) — the workspace falls back to page-based navigation.
+    """
+    return await DocumentService.get_document_toc(
+        document_id=document_id,
+        organization_id=user.organization_id,
+        version_number=version,
+        db=db,
+    )
+
+
+# ─── Chunks (Phase 6 — internal chunk-debug tooling) ──────────────────────────
+
+@router.get(
+    "/{document_id}/chunks",
+    response_model=DocumentChunksResponse,
+    summary="Chunks of one version with provenance (debug tooling)",
+)
+async def get_document_chunks(
+    document_id: UUID,
+    db: DbSession,
+    user: User = Depends(require_permission("document:read")),
+    version: Optional[int] = Query(None, description="Version number (omit for latest)"),
+    offset: int = Query(0, ge=0, alias="offset"),
+    limit: int = Query(50, ge=1, le=500),
+) -> DocumentChunksResponse:
+    """The retrieval units produced by the CHUNKING stage, with full
+    provenance (section, heading path, pages, flags) — the chunk-quality
+    debugging view that later phases (embeddings/search/citations) build on.
+    """
+    return await DocumentService.get_document_chunks(
+        document_id=str(document_id),
+        organization_id=user.organization_id,
+        version_number=version,
+        offset=offset,
+        limit=limit,
+        db=db,
+    )
+
+
+# ─── Retry (Phase 4 — explicit FAILED → PROCESSING action) ────────────────────
 
 @router.post(
     "/{document_id}/retry",
+    response_model=DocumentRetryResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Retry a failed processing job (active from Phase 4)",
+    summary="Retry a failed processing job (explicit action)",
 )
 async def retry_processing(
     document_id: str,
+    request: Request,
     db: DbSession,
     user: User = Depends(require_permission("document:update")),
-) -> dict:
-    """Phase 4 will wire real retry logic here. For now returns a stub 202."""
-    from app.repositories.document_repository import DocumentRepository
-    from app.core.exceptions import NotFoundError
+) -> DocumentRetryResponse:
+    """Re-create the failed stage's job and transition FAILED → PROCESSING.
 
-    doc_repo = DocumentRepository(db)
-    doc = await doc_repo.get_by_id_for_org(document_id, user.organization_id)
-    if doc is None:
-        raise NotFoundError("Document not found.")
-
-    return {"message": "Retry queued (Phase 4 wires real retry logic)."}
+    Retry is NEVER automatic (Backend §47) — this is the deliberate user
+    action. Raises 409 when there is no failed job or processing is already
+    in flight.
+    """
+    return await JobService.retry_failed_stage(
+        document_id=document_id,
+        organization_id=user.organization_id,
+        user_id=user.id,
+        db=db,
+        request=request,
+    )
 
 
 # ─── Collections router ───────────────────────────────────────────────────────

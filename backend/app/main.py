@@ -22,8 +22,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import RequestIdMiddleware, setup_logging
-from app.infrastructure.database import check_db_health, close_db, init_db
-from app.infrastructure.redis import check_redis_health, close_redis, init_redis
+from app.infrastructure.database import close_db, init_db
+from app.infrastructure.embeddings import init_embedding_provider
+from app.infrastructure.queue import close_queue_pool, init_queue_pool
+from app.infrastructure.reranker import init_reranker_provider
+from app.infrastructure.redis import close_redis, init_redis
 from app.infrastructure.storage import (
     create_storage_provider_from_settings,
     set_storage_provider,
@@ -56,6 +59,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     await init_redis()
 
+    # Arq enqueue pool (Phase 4 — upload creates jobs; workers consume them)
+    try:
+        await init_queue_pool()
+    except Exception as exc:
+        logger.error("Failed to initialize Arq queue pool: %s", exc)
+        # Non-fatal — enqueues fail with logged errors; the worker sweep
+        # recovers PENDING rows once Redis returns.
+
     # Initialize object storage provider (Phase 3)
     try:
         storage_provider = create_storage_provider_from_settings()
@@ -72,11 +83,54 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         # Non-fatal on startup — uploads will fail with 503 if storage is down
 
+    # Initialize embedding provider (Phase 7)
+    try:
+        provider = init_embedding_provider()
+        logger.info(
+            "Embedding provider initialized",
+            extra={
+                "provider": settings.embedding_provider,
+                "model": settings.embedding_model,
+                "dimensions": settings.embedding_dimensions,
+                "ready": provider is not None,
+            },
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to initialize embedding provider: %s",
+            exc,
+            extra={"provider": settings.embedding_provider},
+        )
+        # Non-fatal on startup — search requests will fail with 503 if the
+        # provider is misconfigured, but all other endpoints are unaffected.
+
+    # Initialize reranker provider (Phase 8) — None (disabled) is a valid,
+    # logged outcome: hybrid search then serves unreranked fused ordering.
+    try:
+        reranker = init_reranker_provider()
+        logger.info(
+            "Reranker provider initialized",
+            extra={
+                "provider": settings.reranker_provider,
+                "model": settings.reranker_model,
+                "reranking": reranker is not None,
+            },
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to initialize reranker provider: %s",
+            exc,
+            extra={"provider": settings.reranker_provider},
+        )
+        # Non-fatal on startup — a reranker misconfiguration degrades
+        # ordering (fused fallback), it never blocks the application.
+
     logger.info("All infrastructure initialized — application ready.")
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger.info("Shutting down — disposing infrastructure resources.")
+    await close_queue_pool()
     await close_redis()
     await close_db()
     logger.info("Shutdown complete.")
@@ -129,6 +183,10 @@ def create_app() -> FastAPI:
     from app.api.documents import collections_router, router as documents_router
     app.include_router(documents_router)
     app.include_router(collections_router)
+
+    # Phase 7/8 — Search (chunk debug tooling lives on the documents router)
+    from app.api.search import router as search_router
+    app.include_router(search_router)
 
     return app
 

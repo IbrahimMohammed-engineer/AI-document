@@ -1,0 +1,627 @@
+/* ═════════════════════════════════════════════════════════════════════════════
+   Phase 4 — Background Processing Status UX (FE §6.4 / §11 / §5.2)
+   Imported by features/documents components.
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Status badges (Documents table cells) ─────────────────────────────────── */
+
+.processing-badge-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+  white-space: nowrap;
+}
+
+.status-badge .status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-badge--neutral {
+  background: var(--color-neutral-100);
+  color: var(--color-neutral-600);
+}
+
+.status-badge--active {
+  background: hsl(220 85% 50% / 0.12);
+  color: var(--color-primary-600);
+}
+
+.status-badge--success {
+  background: hsl(152 60% 40% / 0.14);
+  color: var(--color-success);
+}
+
+.status-badge--error {
+  background: hsl(0 72% 51% / 0.12);
+  color: var(--color-error);
+}
+
+/* Pulse = work is happening right now */
+.status-dot.pulse,
+.status-badge--active .status-dot {
+  animation: processing-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes processing-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(0.75); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot.pulse,
+  .status-badge--active .status-dot,
+  .processing-step.is-current .processing-step-dot,
+  .processing-indicator-count .status-dot {
+    animation: none;
+  }
+}
+
+/* Small extra button size used by the retry chip */
+.btn-xs {
+  padding: 2px 8px;
+  font-size: var(--font-size-xs);
+  border-radius: 6px;
+}
+
+/* ── Step tracker (document detail / viewer panels) ────────────────────────── */
+
+.processing-tracker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--surface-card);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: 10px;
+}
+
+.processing-tracker--loading,
+.processing-tracker--error {
+  color: var(--color-neutral-500);
+  font-size: var(--font-size-sm);
+}
+
+.processing-steps {
+  list-style: none;
+  display: flex;
+  align-items: flex-start;
+  margin: 0;
+  padding: 0;
+}
+
+.processing-step {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+}
+
+/* Connector line between dots */
+.processing-step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: calc(50% + 10px);
+  width: calc(100% - 20px);
+  height: 2px;
+  background: var(--color-neutral-200);
+}
+
+.processing-step.is-done:not(:last-child)::after {
+  background: var(--color-success);
+}
+
+.processing-step-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--color-neutral-300);
+  background: var(--color-neutral-0);
+  z-index: 1;
+}
+
+.processing-step.is-done .processing-step-dot {
+  border-color: var(--color-success);
+  background: var(--color-success);
+}
+
+.processing-step.is-current .processing-step-dot {
+  border-color: var(--color-primary-500);
+  background: var(--color-primary-500);
+  animation: processing-pulse 1.4s ease-in-out infinite;
+}
+
+.processing-step.is-failed .processing-step-dot {
+  border-color: var(--color-error);
+  background: var(--color-error);
+}
+
+.processing-step-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-500);
+  text-align: center;
+}
+
+.processing-step.is-current .processing-step-label {
+  color: var(--color-primary-600);
+  font-weight: var(--font-weight-semibold);
+}
+
+.processing-step.is-failed .processing-step-label {
+  color: var(--color-error);
+  font-weight: var(--font-weight-semibold);
+}
+
+.processing-tracker--compact .processing-steps {
+  justify-content: space-between;
+}
+
+.processing-tracker--compact .processing-step {
+  flex: 0 0 auto;
+}
+
+/* ── Progress + live detail ────────────────────────────────────────────────── */
+
+.processing-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.processing-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-neutral-100);
+  overflow: hidden;
+}
+
+.processing-progress-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--color-primary-500), var(--color-primary-400));
+  transition: width 0.5s ease;
+}
+
+.processing-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-600);
+}
+
+.processing-meta--ok { color: var(--color-success); }
+.processing-meta--error { color: var(--color-error); }
+
+.processing-job-status { color: var(--color-neutral-400); }
+
+.processing-progress-message {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-neutral-400);
+}
+
+.processing-error-message {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Global header indicator (FE §5.2) ─────────────────────────────────────── */
+
+.processing-indicator {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-right: var(--space-4);
+}
+
+.processing-indicator-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: hsl(220 85% 50% / 0.12);
+  color: var(--color-primary-600);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: default;
+}
+
+.processing-indicator-count .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-primary-500);
+  animation: processing-pulse 1.4s ease-in-out infinite;
+}
+
+.processing-indicator-list {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 280px;
+  margin: 0;
+  padding: var(--space-2);
+  list-style: none;
+  background: var(--surface-card);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px hsl(220 20% 11% / 0.12);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease;
+  z-index: 50;
+}
+
+.processing-indicator:hover .processing-indicator-list,
+.processing-indicator:focus-within .processing-indicator-list {
+  opacity: 1;
+  visibility: visible;
+}
+
+.processing-indicator-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: 6px;
+}
+
+.processing-indicator-item + .processing-indicator-item {
+  margin-top: 2px;
+}
+
+.processing-indicator-name {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-neutral-800);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.processing-indicator-meta {
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-500);
+}
+
+.processing-indicator-more {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-400);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   Phase 5 — Document Workspace (FE §6 slice: viewer + extracted pages)
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.workspace-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-500);
+  margin-bottom: var(--space-1);
+}
+
+.workspace-breadcrumb a {
+  color: var(--color-primary-600);
+  text-decoration: none;
+}
+
+.workspace-breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+.workspace-processing {
+  margin-bottom: var(--space-4);
+}
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+@media (max-width: 960px) {
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Viewer (signed-URL iframe) ──────────────────────────────────────────────── */
+
+.workspace-viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.workspace-viewer-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.viewer-frame {
+  width: 100%;
+  height: min(72vh, 820px);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  background: var(--color-neutral-50);
+}
+
+.viewer-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  height: min(52vh, 560px);
+  border: 1px dashed var(--color-neutral-300);
+  border-radius: var(--radius-md);
+  color: var(--color-neutral-500);
+  font-size: var(--font-size-sm);
+  text-align: center;
+  padding: var(--space-4);
+}
+
+.viewer-placeholder--error {
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+
+/* ── Partial-OCR warning (page-level "OCR failed" markers) ──────────────────── */
+
+.partial-ocr-warning {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  border: 1px solid hsl(38 92% 50% / 0.45);
+  border-radius: var(--radius-md);
+  background: hsl(38 92% 50% / 0.10);
+  color: hsl(32 80% 30%);
+  font-size: var(--font-size-sm);
+}
+
+/* ── Extracted pages panel ───────────────────────────────────────────────────── */
+
+.workspace-pages-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.workspace-pages-count {
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-500);
+  white-space: nowrap;
+}
+
+.pages-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: min(72vh, 820px);
+  overflow-y: auto;
+}
+
+.pages-item {
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.pages-item-head {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.pages-item-head:hover {
+  background: var(--color-neutral-50);
+}
+
+.pages-item-number {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-neutral-600);
+  min-width: 3.2rem;
+}
+
+.pages-item-snippet {
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-500);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pages-item-text {
+  margin: 0;
+  padding: var(--space-3);
+  border-top: 1px solid var(--color-neutral-200);
+  background: var(--color-neutral-50);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed, 1.6);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* ┌───────────────────────────────────────────────────────────────────────────┐
+   Phase 6 — Document Workspace TOC panel (FE §6.5 / §17)
+   Rendered by TocPanel from the real document_sections tree.
+   └───────────────────────────────────────────────────────────────────────────┘ */
+
+.workspace-toc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.workspace-toc-count {
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-500);
+}
+
+.toc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toc-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 30px;
+  padding: 2px 6px;
+  border-radius: var(--radius-md, 8px);
+}
+
+.toc-row:hover {
+  background: var(--color-neutral-100);
+}
+
+.toc-item {
+  padding-left: calc(var(--toc-depth, 0) * var(--space-4));
+}
+
+.toc-toggle {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  width: 18px;
+  color: var(--color-neutral-500);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.toc-toggle--leaf {
+  cursor: default;
+  text-align: center;
+}
+
+.toc-link {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  text-align: left;
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-800);
+  cursor: pointer;
+  min-width: 0;
+  flex: 1;
+}
+
+.toc-link:hover .toc-title {
+  text-decoration: underline;
+}
+
+.toc-link[aria-current='true'] .toc-title {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-primary-600);
+}
+
+.toc-number {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-500);
+  flex-shrink: 0;
+  min-width: 28px;
+}
+
+.toc-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toc-pages {
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-400);
+  flex-shrink: 0;
+}
+
+/* Skeleton — FE §6.5 "TOC skeleton (5 lines)" */
+.toc-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.toc-skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--color-neutral-100) 25%,
+    var(--color-neutral-200) 50%,
+    var(--color-neutral-100) 75%
+  );
+  background-size: 200% 100%;
+  animation: toc-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes toc-skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Side column: TOC above the extracted-pages panel */
+.workspace-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}

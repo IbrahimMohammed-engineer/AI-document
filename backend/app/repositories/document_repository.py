@@ -15,12 +15,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, desc, func, or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.models.document import (
     Collection,
@@ -358,6 +356,30 @@ class DocumentVersionRepository(BaseRepository[DocumentVersion]):
             update(DocumentVersion)
             .where(DocumentVersion.id == version_id)
             .values(**values)
+        )
+        await self._session.flush()
+
+    async def set_file_size(self, version_id: str, size_bytes: int) -> None:
+        """Record the authoritative file size (worker verification — Phase 4).
+
+        Does NOT commit.
+        """
+        await self._session.execute(
+            update(DocumentVersion)
+            .where(DocumentVersion.id == version_id)
+            .values(file_size_bytes=size_bytes)
+        )
+        await self._session.flush()
+
+    async def set_page_count(self, version_id: str, page_count: int) -> None:
+        """Backfill page_count after extraction completes (Phase 5).
+
+        Does NOT commit.
+        """
+        await self._session.execute(
+            update(DocumentVersion)
+            .where(DocumentVersion.id == version_id)
+            .values(page_count=page_count)
         )
         await self._session.flush()
 

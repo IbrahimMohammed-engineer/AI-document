@@ -1,17 +1,51 @@
 """
-Authorization service for live permission checks.
+Authorization service — live permission checks and document-scope resolution.
+
+Phase 2: check_permission() — re-validates permissions against the DB on
+  every sensitive operation (not just JWT claims — Backend §13 layer 2).
+
+Phase 7: resolve_allowed_documents() — returns the set of document_version
+  IDs the authenticated user is permitted to search/retrieve.  This is the
+  mandatory pre-retrieval step for all RAG queries (Backend §29):
+
+    Every retrieval function receives a non-optional version_ids list and
+    every query includes that list as a WHERE predicate.  An empty list means
+    zero allowed documents — the retrieval is short-circuited, never broadened.
+
+Access rules (Backend §15; DB §13):
+  - ``access_level = 'organization'``:  all active org members may read.
+  - ``access_level = 'restricted'``:   owner + explicit document_permissions
+    grants (Phase 16 full implementation — Phase 7 treats as org-readable to
+    unblock the pipeline; the full restriction layer is hardened in Phase 16).
+  - ``access_level = 'private'``:      owner only.
+
+Scope parameter (domain.versioning.VersionScope):
+  - kind='all'         — every document the user can read in the org.
+  - kind='documents'   — a specific subset of document IDs.
+  - kind='collections' — all documents belonging to the named collections.
+
+Returns: list[str] of document_version_id UUIDs (the ``is_current`` version
+  of each allowed document, or empty list if none are accessible).
 """
 from __future__ import annotations
+
+import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import InsufficientPermissionsError
 from app.domain.permissions import get_user_permissions, has_permission
+from app.domain.versioning import VersionScope, resolve_current_version
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
 
+logger = logging.getLogger(__name__)
+
 
 class AuthorizationService:
+
+    # ── Permission check (Phase 2) ────────────────────────────────────────────
+
     @staticmethod
     async def check_permission(
         *,
@@ -29,3 +63,177 @@ class AuthorizationService:
     @staticmethod
     def resolve_allowed_document_filter(user: User) -> dict[str, set[str]]:
         return {"permissions": get_user_permissions(user.roles)}
+
+    # ── Document scope resolution (Phase 7) ───────────────────────────────────
+
+    @staticmethod
+    async def resolve_allowed_documents(
+        user: User,
+        db: AsyncSession,
+        *,
+        scope: VersionScope | None = None,
+    ) -> list[str]:
+        """Return the list of document_version_id strings the user may search.
+
+        This is the Phase 7 retrieval-gate (Backend §29 — four-layer
+        enforcement; layer 4 = retrieval level).  The output feeds directly
+        into ``chunk_repo.semantic_search(version_ids=...)``.
+
+        Empty return value = no documents in scope → the caller must
+        short-circuit and return an empty result set, NEVER broadening the
+        scope or searching without a filter.
+
+        Args:
+            user:  The authenticated user (org_id from the JWT; never from
+                   request body — Backend §14).
+            db:    Active session for document/version queries.
+            scope: Optional VersionScope; defaults to VersionScope.all_documents()
+                   (all org-accessible documents the user can read).
+
+        Returns:
+            List of version_id strings (may be empty).
+        """
+        if scope is None:
+            scope = VersionScope.all_documents()
+
+        org_id = user.organization_id
+
+        # Import here to avoid circular imports (repository → model → repository)
+        from app.models.document import Document, DocumentVersion
+        from sqlalchemy import select
+
+        # ── Step 1: collect in-scope documents ────────────────────────────
+        if scope.kind == "all":
+            stmt = select(Document).where(
+                Document.organization_id == org_id,
+                Document.deleted_at.is_(None),
+                Document.status == "active",
+            )
+        elif scope.kind == "documents":
+            if not scope.document_ids:
+                return []
+            stmt = select(Document).where(
+                Document.organization_id == org_id,
+                Document.deleted_at.is_(None),
+                Document.status == "active",
+                Document.id.in_(list(scope.document_ids)),
+            )
+        elif scope.kind == "collections":
+            if not scope.collection_ids:
+                return []
+            from app.models.document import CollectionDocument
+            stmt = (
+                select(Document)
+                .join(
+                    CollectionDocument,
+                    CollectionDocument.document_id == Document.id,
+                )
+                .where(
+                    Document.organization_id == org_id,
+                    Document.deleted_at.is_(None),
+                    Document.status == "active",
+                    CollectionDocument.collection_id.in_(list(scope.collection_ids)),
+                )
+                .distinct()
+            )
+        else:
+            logger.error("Unknown VersionScope.kind=%r — returning empty scope", scope.kind)
+            return []
+
+        result = await db.execute(stmt)
+        documents = list(result.scalars().all())
+
+        if not documents:
+            logger.debug(
+                "resolve_allowed_documents: no active documents in scope for org=%s scope=%s",
+                org_id, scope.kind,
+            )
+            return []
+
+        # ── Step 2: access-level filtering ────────────────────────────────
+        # Phase 7 access rule implementation:
+        #   - 'organization':  all org members
+        #   - 'private':       owner only
+        #   - 'restricted':    owner; Phase 16 will add explicit-grant checks
+        allowed_doc_ids: list[str] = []
+        for doc in documents:
+            if doc.access_level == "organization":
+                allowed_doc_ids.append(doc.id)
+            elif doc.access_level == "private":
+                if doc.owner_id == user.id:
+                    allowed_doc_ids.append(doc.id)
+                # else: not accessible — silently excluded (never 403 on search)
+            elif doc.access_level == "restricted":
+                # Phase 7: treat as org-accessible (full restriction check in Phase 16)
+                allowed_doc_ids.append(doc.id)
+                # TODO Phase 16: check document_permissions table for this user
+            else:
+                # Unknown access level — exclude defensively
+                logger.warning(
+                    "Document %s has unrecognised access_level=%r — excluding from search",
+                    doc.id, doc.access_level,
+                )
+
+        if not allowed_doc_ids:
+            return []
+
+        # ── Step 3: resolve current versions ──────────────────────────────
+        # Fetch all versions for the allowed documents in one query, then
+        # use the pure domain function to pick the current one per doc.
+        # Phase 8 (Backend §30): when the scope carries a temporal ``as_of``
+        # point-in-time, the SAME domain function resolves "the version
+        # effective at that moment" — no separate historical code path.
+        versions_result = await db.execute(
+            select(DocumentVersion).where(
+                DocumentVersion.document_id.in_(allowed_doc_ids),
+                DocumentVersion.status == "READY",
+            )
+        )
+        all_versions = list(versions_result.scalars().all())
+
+        as_of_date = _parse_as_of(scope.as_of)
+        if scope.as_of and as_of_date is None:
+            logger.warning(
+                "resolve_allowed_documents: unparseable scope.as_of=%r — "
+                "resolving current versions instead",
+                scope.as_of,
+            )
+
+        # Group versions by document_id, resolve current for each
+        from collections import defaultdict
+        by_doc: dict[str, list] = defaultdict(list)
+        for v in all_versions:
+            by_doc[v.document_id].append(v)
+
+        version_ids: list[str] = []
+        for doc_id, versions in by_doc.items():
+            current = resolve_current_version(versions, as_of=as_of_date)
+            if current is not None:
+                version_ids.append(str(getattr(current, "id")))
+            # None → the document had no version effective at as_of: it is
+            # excluded from this query's candidate set, NOT an error
+            # (Backend §30 step 4).
+
+        logger.debug(
+            "resolve_allowed_documents: org=%s scope=%s as_of=%s → %d allowed documents, "
+            "%d ready versions",
+            org_id, scope.kind, scope.as_of, len(allowed_doc_ids), len(version_ids),
+        )
+
+        return version_ids
+
+
+def _parse_as_of(as_of: str | None):
+    """Parse the scope's ISO-8601 ``as_of`` string into a date (or None)."""
+    if not as_of:
+        return None
+    from datetime import date as _date, datetime as _datetime
+
+    try:
+        parsed = _datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        return parsed.date()
+    except ValueError:
+        try:
+            return _date.fromisoformat(as_of[:10])
+        except ValueError:
+            return None

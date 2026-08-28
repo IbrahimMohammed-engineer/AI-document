@@ -4,37 +4,46 @@ SQLAlchemy ORM models for the document management domain.
 Tables:
   - Document          — logical business document (stable across versions)
   - DocumentVersion   — one row per uploaded file / processing run
+  - DocumentPage      — extracted/OCR'd page content + geometry (Phase 5)
+  - DocumentSection   — hierarchical TOC node per version (Phase 6)
+  - DocumentChunk     — the retrieval unit with full provenance (Phase 6)
   - DocumentTag       — N:M join (document_id, tag)
   - Collection        — named document groups (org-scoped)
   - CollectionDocument — N:M join (collection_id, document_id)
 
 See:
   Database-Architecture-Design-Documentation.md §13–14 (documents/versions)
+  Database-Architecture-Design-Documentation.md §15 (pages, sections)
+  Database-Architecture-Design-Documentation.md §16 (chunks)
   Database-Architecture-Design-Documentation.md §19 (collections)
 """
 from __future__ import annotations
 
-import uuid
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Optional
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Optional
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
+    false as sql_false,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import UserDefinedType
 
 from app.models.base import Base, TimestampMixin, generate_uuid
 
@@ -273,6 +282,382 @@ class DocumentVersion(Base):
         return (
             f"<DocumentVersion id={self.id!r} "
             f"doc={self.document_id!r} v{self.version_number} status={self.status!r}>"
+        )
+
+
+# ── DocumentPage ──────────────────────────────────────────────────────────────
+
+class DocumentPage(Base):
+    """One extracted (or OCR'd) page of a document version.
+
+    Written incrementally by the EXTRACTION stage (Phase 5), streamed in
+    batches so worker memory stays bounded and crashes resume from the last
+    persisted page. Pages are immutable once written for a version; explicit
+    retry semantics replace them deliberately.
+
+    `page_metadata` maps to the DB column `metadata` (JSONB): OCR provider,
+    confidence (internal-only quality signal), per-line bounding boxes for
+    future citation highlighting, and the explicit "OCR failed" marker.
+
+    See Database-Architecture-Design-Documentation.md §15.
+    """
+
+    __tablename__ = "document_pages"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id", "page_number",
+            name="uq_document_pages_version_page",
+        ),
+        CheckConstraint(
+            "page_number >= 1",
+            name="ck_document_pages_page_number",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=generate_uuid,
+        server_default=text("gen_random_uuid()"),
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    page_number: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="1-indexed reading order",
+    )
+    text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+        server_default="",
+        comment="Extracted or OCR'd raw text for the page",
+    )
+    ocr_used: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=sql_false(),
+        comment="True if this page's text came from OCR rather than native extraction",
+    )
+    render_storage_key: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Optional pre-rendered page image (perf optimization — later phase)",
+    )
+    width: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(10, 2),
+        nullable=True,
+        comment="Page width (points) — normalizes highlight bounding boxes",
+    )
+    height: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(10, 2),
+        nullable=True,
+        comment="Page height (points) — normalizes highlight bounding boxes",
+    )
+    # NOTE: attribute is `page_metadata` (Base.metadata is reserved in
+    # SQLAlchemy); the DB column is named `metadata`.
+    page_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=True,
+        comment="OCR provider/confidence/line boxes (internal) + ocr_failed marker",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    # ─── Relationships ────────────────────────────────────────────────────────
+    version: Mapped[DocumentVersion] = relationship(
+        "DocumentVersion",
+        lazy="noload",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentPage version={self.document_version_id!r} "
+            f"page={self.page_number} ocr={self.ocr_used}>"
+        )
+
+
+# ── Minimal pgvector DDL mirror ──────────────────────────────────────────────
+
+class PgVector(UserDefinedType):
+    """DDL-only mirror of the pgvector column type on document_chunks.embedding.
+
+    Dimensionality is pinned by migration 007 (DB §17 — the model must be
+    re-created and every chunk re-embedded to change it). This type exists so
+    the ORM can resolve the column; Phase 7's embedding client owns real
+    vector values.
+    """
+
+    def get_col_spec(self) -> str:
+        return "vector(1536)"
+
+    def __repr__(self) -> str:
+        return "PgVector(1536)"
+
+
+# ── DocumentSection ──────────────────────────────────────────────────────────
+
+class DocumentSection(Base):
+    """One node of a version's hierarchical table-of-contents tree.
+
+    Produced by the heuristic structure detector (Phase 6): a self-referencing
+    adjacency list — unbounded TOC depth, trivial "immediate children" reads
+    for the TOC tree, recursive CTEs for the rare full ancestor path
+    (citation breadcrumbs). Documents with no detectable structure simply
+    have ZERO rows here — an explicitly supported, non-error state
+    (Backend §20; FE §6.5 "No structure detected").
+
+    sort_order is the reading-order index across the whole tree, which keeps
+    sibling order correct without relying on section numbers being sortable.
+
+    See Database-Architecture-Design-Documentation.md §15.
+    """
+
+    __tablename__ = "document_sections"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id", "sort_order",
+            name="uq_document_sections_version_order",
+        ),
+        CheckConstraint(
+            "start_page >= 1",
+            name="ck_document_sections_start_page",
+        ),
+        CheckConstraint(
+            "sort_order >= 0",
+            name="ck_document_sections_sort_order",
+        ),
+        Index(
+            "ix_document_sections_version_parent",
+            "document_version_id",
+            "parent_section_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=generate_uuid,
+        server_default=text("gen_random_uuid()"),
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    parent_section_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_sections.id", ondelete="CASCADE"),
+        nullable=True,
+        comment="NULL = top-level section",
+    )
+    title: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="Heading text (numbering prefix stripped)",
+    )
+    section_number: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="e.g. '4.2' — text: numbering schemes vary (4.2, IV.b, Appendix A)",
+    )
+    start_page: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="1-indexed page the heading appears on",
+    )
+    end_page: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Page where the next same-or-higher-level heading begins",
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Reading-order index across the whole tree",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    # ─── Relationships ────────────────────────────────────────────────────────
+    version: Mapped[DocumentVersion] = relationship(
+        "DocumentVersion",
+        lazy="noload",
+    )
+    parent: Mapped[Optional[DocumentSection]] = relationship(
+        "DocumentSection",
+        remote_side="DocumentSection.id",
+        lazy="noload",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentSection version={self.document_version_id!r} "
+            f"no={self.section_number!r} title={self.title!r}>"
+        )
+
+
+# ── DocumentChunk ────────────────────────────────────────────────────────────
+
+class DocumentChunk(Base):
+    """The retrieval unit — full provenance back to page(s) and section.
+
+    Written by the CHUNKING stage (Phase 6) with upsert idempotency on
+    (document_version_id, chunk_index): re-runs overwrite, never duplicate
+    (Backend §49). `organization_id` is denormalized from the owning
+    document so every retrieval query filters tenant directly — drift from
+    the parent document's org is made structurally impossible by the
+    trg_chunk_org_consistency trigger (DB §28), not merely forbidden.
+
+    `embedding`/`embedding_model` stay NULL until the Phase 7 embedding
+    stage fills them; `content_tsv` is a DB-generated tsvector (read-only —
+    never written by application code) that Phase 8's keyword search indexes.
+
+    See Database-Architecture-Design-Documentation.md §16.
+    """
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id", "chunk_index",
+            name="uq_document_chunks_version_index",
+        ),
+        CheckConstraint(
+            "chunk_index >= 0",
+            name="ck_document_chunks_chunk_index",
+        ),
+        CheckConstraint(
+            "token_count >= 0",
+            name="ck_document_chunks_token_count",
+        ),
+        Index("ix_document_chunks_document_version_id", "document_version_id"),
+        Index("ix_document_chunks_page_id", "page_id"),
+        Index("ix_document_chunks_section_id", "section_id"),
+        Index("ix_document_chunks_organization_id", "organization_id"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=generate_uuid,
+        server_default=text("gen_random_uuid()"),
+    )
+    organization_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="DENORMALIZED from the owning document — trigger-enforced consistent",
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    page_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_pages.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="The chunk's starting page",
+    )
+    end_page_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_pages.id", ondelete="CASCADE"),
+        nullable=True,
+        comment="Set only when the chunk spans multiple pages",
+    )
+    section_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_sections.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="Nullable — preambles/unstructured documents have no section",
+    )
+    chunk_index: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Sequential reading order within the version, 0-based",
+    )
+    content: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    content_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="SHA-256 hex of content — dedup + Phase 12 cheap change pre-diff",
+    )
+    token_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Tokenizer token count — LLM context-budget accounting",
+    )
+    # NOTE: attribute is `chunk_metadata` (Base.metadata is reserved in
+    # SQLAlchemy); the DB column is named `metadata`.
+    chunk_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        comment="Heading path, table/list flags, bounding boxes, forced-split notes",
+    )
+    embedding: Mapped[Optional[Any]] = mapped_column(
+        PgVector,
+        nullable=True,
+        comment="pgvector(1536) — NULL until the Phase 7 embedding stage",
+    )
+    embedding_model: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Set together with embedding by Phase 7 (model/version provenance)",
+    )
+    # DB-generated, read-only: populated by the STORED generated-column
+    # expression; application code never writes it (Phase 8 adds the GIN idx).
+    content_tsv: Mapped[Optional[str]] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', content)", persisted=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    # ─── Relationships ────────────────────────────────────────────────────────
+    version: Mapped[DocumentVersion] = relationship(
+        "DocumentVersion",
+        lazy="noload",
+    )
+    page: Mapped[DocumentPage] = relationship(
+        "DocumentPage",
+        foreign_keys=[page_id],
+        lazy="noload",
+    )
+    end_page: Mapped[Optional[DocumentPage]] = relationship(
+        "DocumentPage",
+        foreign_keys=[end_page_id],
+        lazy="noload",
+    )
+    section: Mapped[Optional[DocumentSection]] = relationship(
+        "DocumentSection",
+        lazy="noload",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentChunk version={self.document_version_id!r} "
+            f"index={self.chunk_index} tokens={self.token_count}>"
         )
 
 

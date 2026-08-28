@@ -11,14 +11,11 @@ This env.py configures Alembic to:
 """
 from __future__ import annotations
 
-import asyncio
 import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 # Import all models so Alembic autogenerate detects them
 from app.models.base import Base  # noqa: F401 — sets up Base.metadata
@@ -37,6 +34,9 @@ from app.models.document import (  # noqa: F401
     Collection,
     CollectionDocument,
     Document,
+    DocumentChunk,
+    DocumentPage,
+    DocumentSection,
     DocumentTag,
     DocumentVersion,
 )

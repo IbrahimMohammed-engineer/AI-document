@@ -14,7 +14,7 @@ All response models use from_attributes = True (ORM mode).
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -35,6 +35,8 @@ class DocumentUploadResponse(_OrmBase):
     status: str = "UPLOADED"
     is_duplicate_warning: bool = False
     duplicate_version_id: Optional[str] = None
+    # Phase 4 — the durable first processing job created with this upload
+    job_id: Optional[str] = None
 
 
 # ── Tag / Version summary models ──────────────────────────────────────────────
@@ -247,11 +249,109 @@ class CollectionDocumentRequest(BaseModel):
 # ── Document status ───────────────────────────────────────────────────────────
 
 class DocumentStatusResponse(BaseModel):
-    """GET /documents/{id}/status — processing status snapshot."""
+    """GET /documents/{id}/status — processing status snapshot (polling)."""
     document_id: str
     version_id: str
     version_number: int
     status: str
     progress: Optional[int] = None  # 0–100, populated by workers
+    progress_message: Optional[str] = None  # e.g. "340/512 chunks embedded"
     error_message: Optional[str] = None
-    current_step: Optional[str] = None
+    # Live job detail from the latest processing_jobs row (Phase 4)
+    current_step: Optional[str] = None  # job_type of the in-flight stage
+    job_id: Optional[str] = None
+    job_status: Optional[str] = None
+
+
+# ── Extracted pages (Phase 5) ─────────────────────────────────────────────────
+
+class DocumentPageItem(BaseModel):
+    """One extracted page: text + OCR provenance (workspace/debug tooling).
+
+    `ocr_failed` is derived from the page's internal metadata — the explicit
+    per-page marker that drives the partial-processing warning. OCR
+    confidence/line boxes stay internal (never exposed via the API in V1).
+    """
+    page_number: int
+    text: str
+    ocr_used: bool
+    ocr_failed: bool = False
+    width: Optional[float] = None
+    height: Optional[float] = None
+
+
+class DocumentPagesResponse(BaseModel):
+    """GET /documents/{id}/pages?version= — extracted pages of one version."""
+    document_id: str
+    version_id: str
+    version_number: int
+    mime_type: str
+    status: str
+    page_count: Optional[int] = None  # backfilled post-extraction
+    total: int                        # pages persisted so far
+    items: list[DocumentPageItem]
+
+
+# ── Table of contents (Phase 6) ───────────────────────────────────────────────
+
+class TocNode(BaseModel):
+    """One node of the section tree (GET /documents/{id}/toc).
+
+    Rendered directly by the workspace TOC panel (FE §6.5); `children` is
+    empty for leaves. An empty top-level `items` list is the explicit
+    "No structure detected" state — page-based navigation only.
+    """
+    id: str
+    title: str
+    section_number: Optional[str] = None
+    level: int
+    start_page: int
+    end_page: Optional[int] = None
+    sort_order: int
+    children: list["TocNode"] = Field(default_factory=list)
+
+
+TocNode.model_rebuild()
+
+
+class DocumentTocResponse(BaseModel):
+    """GET /documents/{id}/toc?version= — section tree for one version."""
+    document_id: str
+    version_id: str
+    version_number: int
+    has_structure: bool
+    section_count: int
+    items: list[TocNode]
+
+
+# ── Chunks (Phase 6 — internal chunk-debug tooling) ───────────────────────────
+
+class DocumentChunkItem(BaseModel):
+    """One chunk with its full provenance (chunk-debug tooling).
+
+    The retrieval unit exposed for debugging chunk quality — the baseline
+    for every later phase (embeddings, search, citations, comparison).
+    """
+    chunk_index: int
+    content: str
+    token_count: int
+    content_hash: str
+    section_id: Optional[str] = None
+    section_number: Optional[str] = None
+    heading_path: list[str] = Field(default_factory=list)
+    start_page: Optional[int] = None  # from metadata.page_span
+    end_page: Optional[int] = None
+    contains_table: bool = False
+    contains_list: bool = False
+    forced_split: bool = False
+    has_embedding: bool = False  # Phase 7 fills embeddings — always False now
+
+
+class DocumentChunksResponse(BaseModel):
+    """GET /documents/{id}/chunks?version= — chunks of one version."""
+    document_id: str
+    version_id: str
+    version_number: int
+    status: str
+    total: int
+    items: list[DocumentChunkItem]

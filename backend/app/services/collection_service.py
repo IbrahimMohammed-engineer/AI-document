@@ -22,7 +22,6 @@ from app.schemas.document import (
     CollectionCreate,
     CollectionListResponse,
     CollectionResponse,
-    CollectionUpdate,
 )
 from app.services.audit_logger import AuditAction, AuditLogger
 
@@ -50,7 +49,8 @@ class CollectionService:
                 f"A collection named '{payload.name}' already exists in your organization."
             )
 
-        async with db.begin():
+        # SELECTs above implicitly began the transaction — write and commit on it
+        try:
             col = await col_repo.create(
                 organization_id=organization_id,
                 name=payload.name,
@@ -66,6 +66,10 @@ class CollectionService:
                 metadata={"name": col.name},
                 request=request,
             )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
         return CollectionResponse(
             id=col.id,
@@ -114,7 +118,7 @@ class CollectionService:
         if col is None:
             raise NotFoundError("Collection not found.")
 
-        async with db.begin():
+        try:
             await col_repo.delete(col)
             await AuditLogger.log(
                 db,
@@ -126,6 +130,10 @@ class CollectionService:
                 metadata={"name": col.name},
                 request=request,
             )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     @staticmethod
     async def add_document(
@@ -149,21 +157,24 @@ class CollectionService:
         if doc is None:
             raise NotFoundError("Document not found.")
 
-        async with db.begin():
+        try:
             member = await col_repo.add_document(collection_id, document_id)
-            if member is None:
-                # Already a member — idempotent, no error
-                return
-            await AuditLogger.log(
-                db,
-                organization_id=organization_id,
-                user_id=user_id,
-                action=AuditAction.COLLECTION_DOCUMENT_ADDED,
-                resource_type="collection",
-                resource_id=collection_id,
-                metadata={"document_id": document_id},
-                request=request,
-            )
+            if member is not None:
+                await AuditLogger.log(
+                    db,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    action=AuditAction.COLLECTION_DOCUMENT_ADDED,
+                    resource_type="collection",
+                    resource_id=collection_id,
+                    metadata={"document_id": document_id},
+                    request=request,
+                )
+            # Already-a-member is idempotent — commit either way
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     @staticmethod
     async def remove_document(
@@ -181,7 +192,7 @@ class CollectionService:
         if col is None:
             raise NotFoundError("Collection not found.")
 
-        async with db.begin():
+        try:
             removed = await col_repo.remove_document(collection_id, document_id)
             if removed:
                 await AuditLogger.log(
@@ -194,3 +205,7 @@ class CollectionService:
                     metadata={"document_id": document_id},
                     request=request,
                 )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise

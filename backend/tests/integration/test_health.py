@@ -29,7 +29,7 @@ async def test_health_live(async_database_url):
 @pytest.mark.integration
 async def test_health_ready_with_db(async_database_url):
     """GET /health/ready returns 200 when DB is reachable."""
-    from app.infrastructure.database import init_db, close_db, _engine
+    from app.infrastructure.database import init_db, close_db
     from app.main import app
 
     # Ensure engine is initialized

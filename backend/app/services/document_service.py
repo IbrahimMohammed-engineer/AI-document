@@ -22,51 +22,53 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 from fastapi import Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.exceptions import (
-    AppException,
     ConflictError,
     NotFoundError,
     StorageUnavailableError,
     ValidationError,
 )
 from app.domain.documents import (
-    AccessLevel,
     FileValidationError,
-    VersionStatus,
     compute_sha256,
     compute_storage_key,
     get_extension,
     validate_file_size,
     validate_file_type,
 )
+from app.domain.state_machines import JobType
 from app.infrastructure.storage import get_storage_provider
 from app.models.document import Document, DocumentVersion
-from app.models.user import User
 from app.repositories.document_repository import (
-    CollectionRepository,
     DocumentRepository,
     DocumentVersionRepository,
 )
 from app.schemas.document import (
     BulkActionItemResult,
     BulkActionResponse,
+    DocumentChunkItem,
+    DocumentChunksResponse,
     DocumentListItem,
     DocumentListResponse,
     DocumentMetadataUpdate,
+    DocumentPageItem,
+    DocumentPagesResponse,
     DocumentResponse,
     DocumentStatusResponse,
+    DocumentTocResponse,
     DocumentUploadResponse,
     DocumentVersionDetail,
     DocumentVersionSummary,
     DownloadUrlResponse,
+    TocNode,
 )
 from app.services.audit_logger import AuditAction, AuditLogger
+from app.services.job_service import JobService
 
 logger = logging.getLogger(__name__)
 
@@ -178,8 +180,11 @@ class DocumentService:
         _settings = get_settings()
         max_bytes = _settings.max_upload_file_size_mb * 1024 * 1024
         file_bytes = b""
-        async for chunk in file:
-            file_bytes += chunk  # type: ignore[operator]
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            file_bytes += chunk
             if len(file_bytes) > max_bytes:
                 from app.core.exceptions import FileTooLargeError
                 raise FileTooLargeError(
@@ -319,9 +324,19 @@ class DocumentService:
                 new_doc.current_version_id = version_id
                 await db.flush()
 
+            # ── Phase 4: the first processing job joins the SAME transaction ──
+            # There is never a committed version without its first job
+            # (Backend §50 — atomic inserts).
+            extraction_job = await JobService.create_for_version(
+                db,
+                organization_id=organization_id,
+                document_version_id=version_id,
+                job_type=JobType.EXTRACTION,
+            )
+
             await db.commit()
 
-        except Exception as exc:
+        except Exception:
             await db.rollback()
             logger.exception(
                 "DB transaction failed after successful storage upload "
@@ -358,12 +373,18 @@ class DocumentService:
             # Audit failure must not fail the upload
             logger.exception("Audit log write failed for upload %s", version_id)
 
+        # ── Phase 4: enqueue the Redis pointer AFTER commit (Backend §50) ─────
+        # If Redis is down the row stays PENDING and the reconciliation sweep
+        # enqueues it once Redis returns.
+        await JobService.enqueue_after_commit(extraction_job)
+
         return DocumentUploadResponse(
             document_id=document_id_to_use,
             version_id=version_id,
             version_number=next_version_number,
             status="UPLOADED",
             is_duplicate_warning=is_duplicate_warning,
+            job_id=extraction_job.id,
         )
 
     # ── Read ───────────────────────────────────────────────────────────────────
@@ -444,7 +465,7 @@ class DocumentService:
         docs = docs[:limit]
 
         # Load tags and current version status for each doc
-        from sqlalchemy import select, and_
+        from sqlalchemy import select
         from app.models.document import DocumentTag
         items: list[DocumentListItem] = []
         for doc in docs:
@@ -544,6 +565,205 @@ class DocumentService:
             error_message=version.error_message,
         )
 
+    # ── Extracted pages (Phase 5) ─────────────────────────────────────────────
+
+    @staticmethod
+    async def get_document_pages(
+        *,
+        document_id: str,
+        organization_id: str,
+        version_number: int | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+        db: AsyncSession,
+    ) -> DocumentPagesResponse:
+        """Extracted pages (text + OCR flags) for one version.
+
+        Workspace/debug tooling (roadmap Phase 5 APIs): available as soon as
+        pages are persisted — mid-extraction reads show partial progress.
+        """
+        from app.repositories.document_page_repository import DocumentPageRepository
+
+        doc_repo = DocumentRepository(db)
+        ver_repo = DocumentVersionRepository(db)
+        page_repo = DocumentPageRepository(db)
+
+        doc = await doc_repo.get_by_id_for_org(document_id, organization_id)
+        if doc is None:
+            raise NotFoundError("Document not found.")
+
+        version = await ver_repo.get_for_document(doc.id, version_number)
+        if version is None:
+            raise NotFoundError("Requested version not found.")
+
+        pages = await page_repo.list_for_version(
+            version.id, offset=offset, limit=limit
+        )
+        total = await page_repo.count_for_version(version.id)
+
+        items = [
+            DocumentPageItem(
+                page_number=p.page_number,
+                text=p.text,
+                ocr_used=p.ocr_used,
+                ocr_failed=bool((p.page_metadata or {}).get("ocr_failed")),
+                width=float(p.width) if p.width is not None else None,
+                height=float(p.height) if p.height is not None else None,
+            )
+            for p in pages
+        ]
+        return DocumentPagesResponse(
+            document_id=doc.id,
+            version_id=version.id,
+            version_number=version.version_number,
+            mime_type=version.mime_type,
+            status=version.status,
+            page_count=version.page_count,
+            total=total,
+            items=items,
+        )
+
+    # ── Table of contents (Phase 6) ───────────────────────────────────────────
+
+    @staticmethod
+    async def get_document_toc(
+        *,
+        document_id: str,
+        organization_id: str,
+        version_number: int | None = None,
+        db: AsyncSession,
+    ) -> DocumentTocResponse:
+        """Section tree for one version (workspace TOC panel, FE §6.5).
+
+        Zero sections is the explicit "No structure detected" state — a
+        supported, non-error outcome for unstructured/scanned documents
+        (Backend §20); the frontend falls back to page navigation.
+        """
+        from app.repositories.document_section_repository import (
+            DocumentSectionRepository,
+        )
+
+        doc_repo = DocumentRepository(db)
+        ver_repo = DocumentVersionRepository(db)
+        section_repo = DocumentSectionRepository(db)
+
+        doc = await doc_repo.get_by_id_for_org(document_id, organization_id)
+        if doc is None:
+            raise NotFoundError("Document not found.")
+
+        version = await ver_repo.get_for_document(doc.id, version_number)
+        if version is None:
+            raise NotFoundError("Requested version not found.")
+
+        sections = await section_repo.list_for_version(version.id)
+
+        # Adjacency-list → tree (single pass over reading-ordered rows)
+        nodes: dict[str, TocNode] = {}
+        roots: list[TocNode] = []
+        depth_by_id: dict[str, int] = {}
+        for section in sections:
+            node = TocNode(
+                id=section.id,
+                title=section.title,
+                section_number=section.section_number,
+                level=1,  # finalized below once the parent chain is known
+                start_page=section.start_page,
+                end_page=section.end_page,
+                sort_order=section.sort_order,
+            )
+            nodes[section.id] = node
+            parent = nodes.get(section.parent_section_id) if section.parent_section_id else None
+            if parent is not None:
+                parent.children.append(node)
+            else:
+                roots.append(node)
+
+        def _finalize(node: TocNode, level: int) -> None:
+            node.level = level
+            depth_by_id[node.id] = level
+            for child in node.children:
+                _finalize(child, level + 1)
+
+        for root in roots:
+            _finalize(root, 1)
+
+        return DocumentTocResponse(
+            document_id=doc.id,
+            version_id=version.id,
+            version_number=version.version_number,
+            has_structure=bool(sections),
+            section_count=len(sections),
+            items=roots,
+        )
+
+    # ── Chunks (Phase 6 — internal chunk-debug tooling) ───────────────────────
+
+    @staticmethod
+    async def get_document_chunks(
+        *,
+        document_id: str,
+        organization_id: str,
+        version_number: int | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+        db: AsyncSession,
+    ) -> DocumentChunksResponse:
+        """Chunks of one version with full provenance (chunk-debug tooling).
+
+        Invaluable for tuning the chunker and for every later phase
+        (embeddings, search, citations, comparison read these rows).
+        """
+        from app.repositories.document_chunk_repository import (
+            DocumentChunkRepository,
+        )
+
+        doc_repo = DocumentRepository(db)
+        ver_repo = DocumentVersionRepository(db)
+        chunk_repo = DocumentChunkRepository(db)
+
+        doc = await doc_repo.get_by_id_for_org(document_id, organization_id)
+        if doc is None:
+            raise NotFoundError("Document not found.")
+
+        version = await ver_repo.get_for_document(doc.id, version_number)
+        if version is None:
+            raise NotFoundError("Requested version not found.")
+
+        chunks = await chunk_repo.list_for_version(
+            version.id, offset=offset, limit=limit
+        )
+        total = await chunk_repo.count_for_version(version.id)
+
+        items = []
+        for c in chunks:
+            meta = c.chunk_metadata or {}
+            page_span = meta.get("page_span") or [None, None]
+            items.append(
+                DocumentChunkItem(
+                    chunk_index=c.chunk_index,
+                    content=c.content,
+                    token_count=c.token_count,
+                    content_hash=c.content_hash,
+                    section_id=c.section_id,
+                    section_number=meta.get("section_number"),
+                    heading_path=meta.get("heading_path") or [],
+                    start_page=page_span[0],
+                    end_page=page_span[1],
+                    contains_table=bool(meta.get("contains_table")),
+                    contains_list=bool(meta.get("contains_list")),
+                    forced_split=bool(meta.get("forced_split")),
+                    has_embedding=c.embedding is not None,
+                )
+            )
+        return DocumentChunksResponse(
+            document_id=doc.id,
+            version_id=version.id,
+            version_number=version.version_number,
+            status=version.status,
+            total=total,
+            items=items,
+        )
+
     # ── Download ───────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -580,22 +800,25 @@ class DocumentService:
         )
 
         # Audit download (every download is audited — no session debouncing)
+        # NOTE: the SELECTs above implicitly began a transaction — write and
+        # commit on it directly (never db.begin() after autobegin).
         try:
-            async with db.begin():
-                await AuditLogger.log(
-                    db,
-                    organization_id=organization_id,
-                    user_id=user_id,
-                    action=AuditAction.DOCUMENT_DOWNLOADED,
-                    resource_type="document",
-                    resource_id=document_id,
-                    metadata={
-                        "version_id": version.id,
-                        "version_number": version.version_number,
-                    },
-                    request=request,
-                )
+            await AuditLogger.log(
+                db,
+                organization_id=organization_id,
+                user_id=user_id,
+                action=AuditAction.DOCUMENT_DOWNLOADED,
+                resource_type="document",
+                resource_id=document_id,
+                metadata={
+                    "version_id": version.id,
+                    "version_number": version.version_number,
+                },
+                request=request,
+            )
+            await db.commit()
         except Exception:
+            await db.rollback()
             logger.exception("Audit log failed for download %s", document_id)
 
         from datetime import timedelta
@@ -634,7 +857,9 @@ class DocumentService:
             and update.access_level != previous_access_level
         )
 
-        async with db.begin():
+        # The SELECTs above implicitly began a transaction — write and commit
+        # on it directly (never db.begin() after autobegin).
+        try:
             await doc_repo.update_metadata(
                 doc,
                 name=update.name,
@@ -673,6 +898,10 @@ class DocumentService:
                     metadata=update.model_dump(exclude_none=True),
                     request=request,
                 )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
         # Reload tags
         from sqlalchemy import select
@@ -707,7 +936,7 @@ class DocumentService:
         if doc is None:
             raise NotFoundError("Document not found.")
 
-        async with db.begin():
+        try:
             await doc_repo.soft_delete(doc)
             await AuditLogger.log(
                 db,
@@ -719,6 +948,10 @@ class DocumentService:
                 metadata={"name": doc.name},
                 request=request,
             )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     @staticmethod
     async def restore(
@@ -742,7 +975,7 @@ class DocumentService:
         if doc.deleted_at is None:
             raise ConflictError("Document is not deleted.")
 
-        async with db.begin():
+        try:
             await doc_repo.restore(doc)
             await AuditLogger.log(
                 db,
@@ -754,6 +987,10 @@ class DocumentService:
                 metadata={"name": doc.name},
                 request=request,
             )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
         # Reload tags
         from sqlalchemy import select
@@ -835,7 +1072,7 @@ class DocumentService:
                         error=str(exc),
                     )
                 )
-            except Exception as exc:
+            except Exception:
                 logger.exception("Bulk action failed for document %s", doc_id)
                 results.append(
                     BulkActionItemResult(

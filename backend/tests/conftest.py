@@ -144,19 +144,20 @@ def run_migrations(database_url):
 async def db_session(async_database_url, run_migrations) -> AsyncGenerator[AsyncSession, None]:
     """Yield a fresh async DB session for each test.
 
-    Each test gets its own session. We use a nested transaction (SAVEPOINT)
-    so each test's changes are rolled back automatically at teardown —
-    no need to truncate tables between tests.
+    Uncommitted work is rolled back automatically at teardown.  Tests (or
+    stage code under test) that COMMIT persist their rows — they seed with
+    fresh UUIDs per test, and the integration files that need a pristine
+    DB use the explicit table-cleanup fixtures instead.  (The previous
+    SAVEPOINT-wrapper version broke on any test-internal commit: the
+    savepoint is released with the transaction, so teardown raised
+    ResourceClosedError.)
     """
     engine = create_async_engine(async_database_url, echo=False)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with factory() as session:
-        async with session.begin():
-            # Create a savepoint — rolled back after each test
-            nested = await session.begin_nested()
-            yield session
-            await nested.rollback()
+        yield session
+        await session.rollback()
 
     await engine.dispose()
 
@@ -224,8 +225,19 @@ async def redis_client(async_redis_url) -> AsyncGenerator[aioredis.Redis, None]:
 # ─── API app fixtures (httpx ASGI client with dependency overrides) ──────────
 
 # FK-safe delete order for per-test cleanup. Roles/permissions are seeded by
-# migration 002 and must survive — only tenant data is wiped.
+# migration 002 and must survive — only tenant data is wiped. The document
+# tables are included so cleanup stays correct even when earlier test files
+# (e.g. the embedding-stage tests) committed document rows.
 _CLEANUP_TABLES = (
+    "document_chunks",
+    "document_sections",
+    "document_pages",
+    "processing_jobs",
+    "collection_documents",
+    "document_tags",
+    "collections",
+    "document_versions",
+    "documents",
     "audit_logs",
     "refresh_tokens",
     "user_roles",

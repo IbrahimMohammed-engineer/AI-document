@@ -11,7 +11,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AnyHttpUrl, Field, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -50,6 +50,36 @@ class Settings(BaseSettings):
         description="Redis connection URL",
     )
 
+    # ─── Background jobs / workers (Phase 4) ─────────────────────────────────
+    worker_queue_name: str = Field(
+        default="arq:queue",
+        description="Which Arq queue this worker process consumes: 'arq:queue' (ingestion) or 'arq:low' (maintenance)",
+    )
+    worker_max_jobs: int = Field(
+        default=4,
+        description="Max concurrent jobs per worker process",
+    )
+    job_default_max_attempts: int = Field(
+        default=3,
+        description="Fallback retry budget when a job type has no specific policy",
+    )
+    job_backoff_base_seconds: int = Field(
+        default=5,
+        description="Base delay for exponential retry backoff (base * 2^(attempt-1))",
+    )
+    job_backoff_max_seconds: int = Field(
+        default=300,
+        description="Upper bound on a single retry backoff delay",
+    )
+    job_stuck_threshold_seconds: int = Field(
+        default=600,
+        description="PROCESSING jobs untouched for this long are considered crashed and re-enqueued by the sweep",
+    )
+    reconciliation_sweep_interval_seconds: int = Field(
+        default=60,
+        description="How often the periodic reconciliation sweep runs",
+    )
+
     # ─── Object Storage ───────────────────────────────────────────────────────
     storage_provider: Literal["minio", "s3", "azure"] = "minio"
     storage_endpoint_url: str | None = "http://localhost:9000"
@@ -84,8 +114,166 @@ class Settings(BaseSettings):
     llm_provider: Literal["openai", "anthropic"] = "openai"
     llm_model: str = "gpt-4o-mini"
 
-    reranker_provider: Literal["cohere", "none"] = "none"
-    ocr_provider: Literal["none", "azure_di", "textract"] = "none"
+    reranker_provider: Literal["cohere", "stub", "none"] = "none"
+    reranker_model: str = "rerank-v3.5"
+    # Reranker latency is bounded by the candidate count (20–30) — 5 s absorbs
+    # provider load spikes; 1 retry then graceful fallback to RRF ordering
+    # (Backend §32/§51 — reranker outage degrades ordering, never the request).
+    reranker_timeout_seconds: float = 5.0
+    reranker_max_retries: int = 1
+    # Minimum normalized rerank score ([0,1]) for a candidate to survive.
+    # Initial value 0.35 (midpoint of the documented 0.3–0.4 starting band);
+    # tuned by Phase 18's evaluation evidence — recorded here per roadmap
+    # Phase 8 risk note ("record the initial value and its evidence").
+    rerank_score_threshold: float = 0.35
+    ocr_provider: Literal["none", "tesseract", "azure_di", "textract"] = "none"
+
+    # ─── Ingestion: extraction + OCR (Phase 5) ────────────────────────────────
+    # Per-page scanned-PDF detection: a page whose native text has fewer than
+    # this many alphanumeric characters is classified as needing OCR
+    # (per-page decision, never per-document — Backend §18).
+    ocr_min_page_alnum_chars: int = 25
+    # Rasterization resolution for OCR input (Backend §19 recommends ~300 DPI)
+    ocr_dpi: int = 300
+    # Per-OCR-call timeout in seconds (roadmap Phase 5 infra: ~20s/page)
+    ocr_timeout_seconds: float = 20.0
+    # Client-level per-page retry budget (roadmap Phase 5 step 10: 2–3×)
+    ocr_max_attempts_per_page: int = 3
+    # Base delay for the per-page exponential retry backoff (2^attempt * base)
+    ocr_retry_backoff_seconds: float = 2.0
+    # Tesseract binary path (auto-detected from PATH when None)
+    tesseract_cmd: str | None = None
+    tesseract_language: str = "eng"
+    # Azure Document Intelligence (cloud OCR) — required when ocr_provider=azure_di
+    ocr_azure_endpoint: str | None = None
+    ocr_azure_api_key: str | None = None
+    # Page persistence batching: document_pages rows are written incrementally
+    # (every N pages) and committed, so a crash resumes from the last
+    # persisted page instead of restarting (Backend §18/§49).
+    extraction_page_batch_size: int = 20
+    # Size bound on per-page OCR metadata (line boxes) — pathological OCR
+    # output must not produce unbounded JSONB (Backend Phase 5 security note)
+    ocr_max_metadata_lines: int = 300
+
+    # ─── Ingestion: structure detection + chunking (Phase 6) ─────────────────
+    # Tokenizer for chunk budgeting — the encoding matching the platform's
+    # default LLM family (Backend §21). Sizes are set conservatively because
+    # budget-counting and embedding may tokenize slightly differently.
+    tokenizer_encoding: str = Field(
+        default="cl100k_base",
+        description="tiktoken encoding used for chunk token counting (cl100k_base = OpenAI family)",
+    )
+    # Target chunk size ~500–800 tokens with a 1,000-token hard maximum
+    # (Backend §21) — retrieval-unit granularity + predictable costs.
+    chunk_target_min_tokens: int = Field(
+        default=500,
+        description="Chunks are flushed once content reaches this many tokens",
+    )
+    chunk_target_max_tokens: int = Field(
+        default=800,
+        description="Chunks aim to stay under this many tokens (soft budget)",
+    )
+    chunk_hard_max_tokens: int = Field(
+        default=1000,
+        description="Absolute maximum tokens per chunk, regardless of structure",
+    )
+    # Overlap 10–15% between adjacent chunks WITHIN the same section only
+    # (Backend §21) — 0.12 of the target band is ~78 tokens.
+    chunk_overlap_ratio: float = Field(
+        default=0.12,
+        description="Overlap fraction of the target band applied when splitting within a section",
+    )
+    # Chunk persistence batching: document_chunks rows are written in batches
+    # (UPSERT) and committed, so a crash resumes without duplicating work.
+    chunking_batch_size: int = Field(
+        default=200,
+        description="Number of chunks per persisted batch during the CHUNKING stage",
+    )
+    # Hard cap on heading-path depth recorded in chunk metadata (JSONB is
+    # size-bounded — pathological documents must not produce unbounded arrays).
+    chunk_max_heading_path_depth: int = Field(
+        default=10,
+        description="Maximum number of ancestor titles stored in chunk metadata heading_path",
+    )
+
+    # ─── Ingestion: embedding pipeline (Phase 7) ──────────────────────────────
+    # Provider selection: "openai" uses text-embedding-3-small; "stub" is for
+    # tests and produces deterministic random vectors (never calls an API).
+    embedding_provider: str = Field(
+        default="openai",
+        description="Embedding provider: 'openai' or 'stub'",
+    )
+    # Number of chunk texts sent to the provider in a single API call.
+    # OpenAI text-embedding-3-small supports up to 2048 inputs per call;
+    # 100 is conservative and matches the recommended batch size (Backend §22).
+    embedding_batch_size: int = Field(
+        default=100,
+        description="Chunks per embedding provider call (incremental checkpoint granularity)",
+    )
+    # Token-bucket ceiling for the shared, cross-worker rate limiter.
+    # text-embedding-3-small tier-1 limit is ~3,000 RPM; stay conservative.
+    embedding_rate_limit_rpm: int = Field(
+        default=2000,
+        description="Max embedding requests-per-minute (Redis-backed token bucket, shared across workers)",
+    )
+    # Per-batch wall-clock timeout.  OpenAI embedding calls complete in <1 s
+    # for 100 short texts; 15 s absorbs provider slowdowns and large batches.
+    embedding_request_timeout_seconds: float = Field(
+        default=15.0,
+        description="Per-batch provider call timeout in seconds",
+    )
+
+    # ─── Retrieval / vector search (Phase 7) ─────────────────────────────────
+    # hnsw.ef_search: higher = better recall, lower = lower latency.
+    # Tune upward for the Ask-AI path (higher recall) and downward for
+    # latency-sensitive features.  This is a session-level PostgreSQL setting
+    # injected before every ANN query, NOT a DDL change (DB §17).
+    hnsw_ef_search: int = Field(
+        default=100,
+        description="pgvector HNSW ef_search (recall/latency trade-off; injected per query session)",
+    )
+    # Default and maximum top-K for the search endpoint (Phase 7 exposes
+    # semantic mode; Phase 8 extends this to hybrid + reranker candidates).
+    search_top_k_default: int = Field(
+        default=10,
+        description="Default number of chunks returned by the search endpoint",
+    )
+    search_top_k_max: int = Field(
+        default=50,
+        description="Maximum top-K the client may request; caps the ANN scan",
+    )
+
+    # ─── Hybrid search + reranking (Phase 8) ─────────────────────────────────
+    # Mode toggle for POST /search (Backend §39): "hybrid" (default) runs
+    # vector + FTS branches and fuses them; "semantic" skips the FTS branch;
+    # "keyword" skips the vector branch AND reranking (reranking's value is
+    # specifically in refining semantically-retrieved candidates).
+    search_mode_default: Literal["hybrid", "semantic", "keyword"] = Field(
+        default="hybrid",
+        description="Default search mode when the request does not specify one",
+    )
+    # Candidate counts (Backend §31 — tuned by Phase 18's evidence, never
+    # hardcoded magic numbers): each branch retrieves its own top-N, the top
+    # fused candidates go to the reranker, which narrows to the final top-K.
+    hybrid_vector_top_k: int = Field(
+        default=50,
+        description="Candidates retrieved by the vector (pgvector ANN) branch",
+    )
+    hybrid_keyword_top_k: int = Field(
+        default=50,
+        description="Candidates retrieved by the full-text search (tsvector) branch",
+    )
+    rerank_candidate_count: int = Field(
+        default=30,
+        description="Maximum fused candidates sent to the reranker (bounded to keep rerank latency predictable)",
+    )
+    # RRF constant k (DB §18): score = Σ 1/(k + rank).  k=60 dampens the
+    # influence of top ranks so a #1 hit on one branch cannot dominate a
+    # chunk that both branches agree on.
+    rrf_k: int = Field(
+        default=60,
+        description="Reciprocal Rank Fusion constant k",
+    )
 
     # ─── CORS ─────────────────────────────────────────────────────────────────
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]

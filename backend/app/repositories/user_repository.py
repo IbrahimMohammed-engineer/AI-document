@@ -18,11 +18,10 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.organization import Organization
-from app.models.user import Permission, Role, User
+from app.models.user import Role, User
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
 logger = logging.getLogger(__name__)

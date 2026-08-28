@@ -126,7 +126,8 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # ─── Arq Worker ────────────────────────────────────────────────────────────
+  # ─── Arq Workers (Phase 4) ─────────────────────────────────────────────────
+  # default queue — ingestion stages (extraction/OCR/chunking/embedding)
   worker:
     build:
       context: ./backend
@@ -137,6 +138,10 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://aidoc_user:aidoc_password@postgres:5432/aidoc_db}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - WORKER_QUEUE_NAME=${WORKER_QUEUE_NAME:-arq:queue}
+      - WORKER_MAX_JOBS=${WORKER_MAX_JOBS:-4}
+      - JOB_STUCK_THRESHOLD_SECONDS=${JOB_STUCK_THRESHOLD_SECONDS:-600}
+      - RECONCILIATION_SWEEP_INTERVAL_SECONDS=${RECONCILIATION_SWEEP_INTERVAL_SECONDS:-60}
       - STORAGE_PROVIDER=${STORAGE_PROVIDER:-minio}
       - STORAGE_ENDPOINT_URL=${STORAGE_ENDPOINT_URL:-http://minio:9000}
       - STORAGE_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
@@ -157,6 +162,43 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio_init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # low queue — maintenance/housekeeping (reconciliation sweep, future purge)
+  worker_low:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: aidoc_worker_low
+    command: python -m app.workers.main
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://aidoc_user:aidoc_password@postgres:5432/aidoc_db}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - WORKER_QUEUE_NAME=arq:low
+      - WORKER_MAX_JOBS=2
+      - JOB_STUCK_THRESHOLD_SECONDS=${JOB_STUCK_THRESHOLD_SECONDS:-600}
+      - RECONCILIATION_SWEEP_INTERVAL_SECONDS=${RECONCILIATION_SWEEP_INTERVAL_SECONDS:-60}
+      - STORAGE_PROVIDER=${STORAGE_PROVIDER:-minio}
+      - STORAGE_ENDPOINT_URL=${STORAGE_ENDPOINT_URL:-http://minio:9000}
+      - STORAGE_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - STORAGE_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin123}
+      - STORAGE_BUCKET_NAME=${STORAGE_BUCKET_NAME:-aidoc-documents}
+      - STORAGE_REGION=${STORAGE_REGION:-us-east-1}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-CHANGE_ME_IN_PRODUCTION_USE_STRONG_RANDOM_SECRET}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio_init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # ─── React Frontend (Vite dev server) ──────────────────────────────────────
