@@ -189,6 +189,12 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
         return list(result.scalars().all())
 
     # ── State transitions (flush only — callers own the transaction) ──────────
+    #
+    # Every transition publishes a relay wake event (Phase 11 — Backend §37)
+    # so any API instance streaming the document's processing SSE re-reads
+    # the authoritative state immediately.  Publishing is fire-and-forget:
+    # a Redis outage degrades stream latency to the SSE poll interval and
+    # never breaks the pipeline.
 
     async def mark_processing(self, job: ProcessingJob, *, now: datetime) -> ProcessingJob:
         """PENDING/RETRYING → PROCESSING; sets started_at once, bumps attempts."""
@@ -198,6 +204,7 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
             job.started_at = now
         job.error_message = None
         await self._session.flush()
+        await self._publish_wake(job)
         return job
 
     async def mark_progress(
@@ -213,6 +220,7 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
         if message is not None:
             job.progress_message = message
         await self._session.flush()
+        await self._publish_wake(job)
         return job
 
     async def mark_retrying(
@@ -223,6 +231,7 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
         job.error_message = error_message
         job.updated_at = now
         await self._session.flush()
+        await self._publish_wake(job)
         return job
 
     async def mark_completed(
@@ -234,6 +243,7 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
         job.progress = progress
         job.error_message = None
         await self._session.flush()
+        await self._publish_wake(job)
         return job
 
     async def mark_failed(
@@ -244,7 +254,15 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
         job.error_message = error_message
         job.completed_at = now
         await self._session.flush()
+        await self._publish_wake(job)
         return job
+
+    @staticmethod
+    async def _publish_wake(job: ProcessingJob) -> None:
+        """Relay wake for this job's version channel (fail-safe — Backend §37)."""
+        from app.infrastructure.relay import publish_job_event
+
+        await publish_job_event(job.document_version_id)
 
 
 def utc_now() -> datetime:

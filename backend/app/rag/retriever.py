@@ -60,6 +60,7 @@ class SearchResult:
     document_id: str
     document_version_id: str
     document_name: str
+    page_id: str
     page_number: int
     section_title: str | None
     chunk_index: int
@@ -172,6 +173,7 @@ class SemanticRetriever:
                 document_id=r.document_id,
                 document_version_id=r.document_version_id,
                 document_name=r.document_name,
+                page_id=r.page_id,
                 page_number=r.page_number,
                 section_title=r.section_title,
                 chunk_index=r.chunk_index,

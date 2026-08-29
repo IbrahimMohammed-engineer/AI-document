@@ -1,5 +1,5 @@
 /**
- * Ask AI styles (Phase 9) — reuses the global design tokens from index.css.
+ * Ask AI styles (Phases 9–11) — reuses the global design tokens from index.css.
  */
 
 .ask-page {
@@ -8,6 +8,157 @@
   gap: 0.75rem;
   height: 100%;
   min-height: 0;
+}
+
+/* ── Conversation list + two-column layout (Phase 11, FE §6.6) ──────────── */
+
+.ask-page-with-list {
+  flex-direction: row;
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.ask-conversations {
+  flex: 0 0 16rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  min-height: 0;
+  border-right: 1px solid var(--color-neutral-200);
+  padding-right: 1rem;
+}
+
+.ask-new-conversation {
+  width: 100%;
+}
+
+.ask-conversation-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ask-conversation-empty {
+  padding: 0.5rem 0.25rem;
+}
+
+.ask-conversation-item {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid transparent;
+}
+
+.ask-conversation-item:hover {
+  background: var(--color-neutral-100);
+}
+
+.ask-conversation-item.active {
+  background: var(--color-primary-50, #eef4ff);
+  border-color: var(--color-primary-200);
+}
+
+.ask-conversation-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.125rem;
+  background: none;
+  border: none;
+  padding: 0.5rem 0.625rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ask-conversation-title {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-neutral-800);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.ask-conversation-meta {
+  font-size: 0.6875rem;
+  color: var(--color-neutral-500);
+}
+
+.ask-conversation-delete {
+  background: none;
+  border: none;
+  color: var(--color-neutral-400);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.375rem 0.5rem;
+  cursor: pointer;
+  border-radius: var(--radius-sm, 6px);
+}
+
+.ask-conversation-delete:hover {
+  color: var(--color-danger-600, #dc2626);
+  background: var(--color-danger-50, #fef2f2);
+}
+
+.ask-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── SYSTEM scope-change markers (Backend §46 rule 18) ──────────────────── */
+
+.ask-turn-system {
+  display: flex;
+  justify-content: center;
+}
+
+.ask-system-marker {
+  font-size: 0.75rem;
+  color: var(--color-neutral-500);
+  background: var(--color-neutral-100);
+  border-radius: 999px;
+  padding: 0.25rem 0.875rem;
+}
+
+/* ── Feedback (FE §6.6 — one rating per user per message) ───────────────── */
+
+.ask-feedback {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-neutral-100);
+}
+
+.ask-feedback-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 6px);
+  font-size: 0.875rem;
+  padding: 0.125rem 0.375rem;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.ask-feedback-btn:hover {
+  opacity: 1;
+  background: var(--color-neutral-100);
+}
+
+.ask-feedback-btn.active {
+  opacity: 1;
+  border-color: var(--color-primary-300);
+  background: var(--color-primary-50, #eef4ff);
 }
 
 /* ── Scope selector ─────────────────────────────────────────────────────── */
@@ -269,4 +420,176 @@
 .ask-input:disabled {
   background: var(--color-neutral-100);
   color: var(--color-neutral-500);
+}
+
+/* ─── Citations (Phase 10, FE §6.7/§12) ─────────────────────────────────────── */
+
+/* Inline citation badge — the product's most reused pattern. Numbered,
+   focusable, aria-labeled; hover/focus reveals the SourcePreview popover. */
+.citation-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: var(--color-primary-50, #eef4ff);
+  color: var(--color-primary-700, #1d4ed8);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0.125rem 0.25rem;
+  margin: 0 0.1rem;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  vertical-align: baseline;
+}
+
+.citation-badge:hover,
+.citation-badge:focus-visible {
+  background: var(--color-primary-100, #dbe6ff);
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 0;
+}
+
+/* Muted unresolved / source-deleted state — never navigable */
+.citation-badge-unresolved {
+  background: var(--color-neutral-200);
+  color: var(--color-neutral-500);
+  cursor: default;
+  padding: 0.125rem 0.375rem;
+}
+
+/* SourcePreview popover — exact span in its immediate context */
+.source-preview {
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 0.5rem);
+  transform: translateX(-50%);
+  width: min(22rem, 80vw);
+  z-index: 40;
+  flex-direction: column;
+  gap: 0.375rem;
+  background: var(--color-neutral-50, #fafafa);
+  border: 1px solid var(--color-neutral-300);
+  border-radius: var(--radius-md, 10px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: var(--color-neutral-800);
+  white-space: normal;
+  cursor: default;
+}
+
+.citation-badge:hover .source-preview,
+.citation-badge:focus-visible .source-preview,
+.citation-row:hover .source-preview,
+.citation-row:focus-visible .source-preview {
+  display: flex;
+}
+
+.source-preview-body {
+  line-height: 1.45;
+}
+
+.source-preview-context {
+  color: var(--color-neutral-500);
+}
+
+.source-preview-quote {
+  background: var(--color-warning-100, #fef3c7);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 0.1rem;
+  font-weight: 500;
+}
+
+.source-preview-meta {
+  color: var(--color-neutral-500);
+  font-size: 0.75rem;
+  border-top: 1px solid var(--color-neutral-200);
+  padding-top: 0.375rem;
+}
+
+/* CitationList — the "Sources" block rows */
+.citation-row {
+  position: relative;
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md, 10px);
+  padding: 0.5rem 0.625rem;
+  margin-top: 0.375rem;
+  cursor: pointer;
+  font: inherit;
+}
+
+.citation-row:hover,
+.citation-row:focus-visible {
+  border-color: var(--color-primary-400);
+  background: var(--color-primary-50, #f6f9ff);
+}
+
+.citation-row-index {
+  font-weight: 600;
+  color: var(--color-primary-700, #1d4ed8);
+  font-size: 0.8125rem;
+}
+
+.citation-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.citation-row-name {
+  font-weight: 600;
+  font-size: 0.8125rem;
+  color: var(--color-neutral-800);
+}
+
+.citation-row-meta {
+  font-size: 0.75rem;
+  color: var(--color-neutral-500);
+}
+
+.citation-row-quote {
+  font-size: 0.8125rem;
+  color: var(--color-neutral-600);
+  font-style: italic;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* Persistent source highlight in the workspace pages panel */
+.source-highlight {
+  background: var(--color-warning-300, #fde68a);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 0.1rem;
+  box-shadow: 0 0 0 2px var(--color-warning-300, #fde68a);
+}
+
+.pages-item-focus {
+  outline: 2px solid var(--color-primary-400);
+  outline-offset: 2px;
+  border-radius: var(--radius-md, 10px);
+}
+
+.citation-focus-banner {
+  background: var(--color-primary-50, #eef4ff);
+  border: 1px solid var(--color-primary-200);
+  color: var(--color-primary-800, #1e40af);
+  font-size: 0.8125rem;
+  border-radius: var(--radius-md, 10px);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.625rem;
 }

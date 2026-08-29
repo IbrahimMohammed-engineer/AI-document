@@ -75,6 +75,7 @@ class ChunkSearchResult:
     document_id: str
     document_version_id: str
     document_name: str
+    page_id: str
     page_number: int
     section_title: str | None
     chunk_index: int
@@ -398,6 +399,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
                 d.id                    AS document_id,
                 c.document_version_id   AS document_version_id,
                 d.name                  AS document_name,
+                c.page_id               AS page_id,
                 p.page_number           AS page_number,
                 s.title                 AS section_title,
                 c.chunk_index           AS chunk_index,
@@ -438,6 +440,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
                 document_id=str(row["document_id"]),
                 document_version_id=str(row["document_version_id"]),
                 document_name=str(row["document_name"]),
+                page_id=str(row["page_id"]),
                 page_number=int(row["page_number"]),
                 section_title=row["section_title"],
                 chunk_index=int(row["chunk_index"]),
@@ -507,6 +510,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
                 d.id                    AS document_id,
                 c.document_version_id   AS document_version_id,
                 d.name                  AS document_name,
+                c.page_id               AS page_id,
                 p.page_number           AS page_number,
                 s.title                 AS section_title,
                 c.chunk_index           AS chunk_index,
@@ -547,6 +551,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
                 document_id=str(row["document_id"]),
                 document_version_id=str(row["document_version_id"]),
                 document_name=str(row["document_name"]),
+                page_id=str(row["page_id"]),
                 page_number=int(row["page_number"]),
                 section_title=row["section_title"],
                 chunk_index=int(row["chunk_index"]),

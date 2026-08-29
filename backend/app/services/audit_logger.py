@@ -43,6 +43,12 @@ class AuditAction:
     # ── Processing events (Phase 4) ───────────────────────────────────────────
     PROCESSING_RETRIED = "PROCESSING_RETRIED"
 
+    # ── AI/chat events (Phase 11) ─────────────────────────────────────────────
+    # Logged once the USER message is persisted — independent of whether
+    # generation ultimately succeeds (Backend Flow 4 step 19).  Provider
+    # payloads (the question text) are NEVER in the metadata (Backend §54).
+    QUESTION_ASKED = "QUESTION_ASKED"
+
 
 class AuditLogger:
     @staticmethod

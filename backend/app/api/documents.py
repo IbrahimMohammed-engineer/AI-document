@@ -23,6 +23,7 @@ Endpoints:
     GET    /documents/{id}/pages              — extracted pages text/OCR (Phase 5)
     GET    /documents/{id}/toc                — section tree for the TOC panel (Phase 6)
     GET    /documents/{id}/chunks             — chunks with provenance (debug, Phase 6)
+    GET    /documents/{id}/content            — one page for the citation source panel (Phase 10)
     POST   /documents/{id}/retry              — retry failed stage (Phase 4)
 
   Collections:
@@ -65,6 +66,7 @@ from app.schemas.document import (
     DocumentChunksResponse,
     DocumentListResponse,
     DocumentMetadataUpdate,
+    DocumentPageContentResponse,
     DocumentPagesResponse,
     DocumentResponse,
     DocumentStatusResponse,
@@ -405,6 +407,35 @@ async def get_document_pages(
         version_number=version,
         offset=offset,
         limit=limit,
+        db=db,
+    )
+
+
+# ─── Page content for the citation source panel (Phase 10) ───────────────────
+
+@router.get(
+    "/{document_id}/content",
+    response_model=DocumentPageContentResponse,
+    summary="One page's extracted content (citation source panel)",
+)
+async def get_document_page_content(
+    document_id: str,
+    db: DbSession,
+    user: User = Depends(require_permission("document:read")),
+    page: int = Query(..., ge=1, description="1-indexed page number"),
+    version: Optional[int] = Query(None, description="Version number (omit for latest)"),
+) -> DocumentPageContentResponse:
+    """The cited page's text + geometry for source rendering (FE §6.7/§12).
+
+    The citation source panel fetches exactly the page a citation points at;
+    404 when the page has no extracted content yet.  Permission path is
+    identical to the pages listing (org-verified document → version → page).
+    """
+    return await DocumentService.get_document_page_content(
+        document_id=document_id,
+        organization_id=user.organization_id,
+        page_number=page,
+        version_number=version,
         db=db,
     )
 

@@ -13,11 +13,17 @@
  *  - TOC panel rendering the real section tree, with the "No structure
  *    detected" empty state and page-navigation fallback (FE §6.5)
  *
- * Search-inside / citations deepen in later phases on this skeleton.
+ * Phase 10 scope (citation navigation, FE §6.7/§12):
+ *  - `?page=N&q=<quoted span>` deep link from a CitationBadge/CitationList:
+ *    the cited page auto-expands, scrolls into view, and the exact quoted
+ *    span renders with a persistent source-highlight overlay (text-offset
+ *    based — the same real source text the backend persisted).
+ *
+ * Search-inside deepens in later phases on this skeleton.
  */
 
-import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 
 import {
   ProcessingStatusBadge,
@@ -41,6 +47,16 @@ function formatBytes(bytes: number): string {
 export function DocumentWorkspace() {
   const { id } = useParams<{ id: string }>()
   const documentId = id ?? null
+  const [searchParams] = useSearchParams()
+
+  // Citation deep-link (FE §12): ?page=N&q=<quoted span> — the cited page
+  // expands with a persistent highlight overlay on the exact source span.
+  const focusPage = (() => {
+    const raw = searchParams.get('page')
+    const parsed = raw != null ? Number.parseInt(raw, 10) : Number.NaN
+    return Number.isFinite(parsed) && parsed >= 1 ? parsed : null
+  })()
+  const highlightText = searchParams.get('q')
 
   const { data: document, isLoading, isError } = useDocument(documentId)
   const { data: pagesData } = useDocumentPages(documentId)
@@ -130,6 +146,8 @@ export function DocumentWorkspace() {
             pages={pagesData?.items ?? []}
             total={pagesData?.total ?? 0}
             pageCount={pagesData?.page_count ?? null}
+            focusPage={focusPage}
+            highlightText={highlightText}
           />
         </div>
       </div>
@@ -212,18 +230,64 @@ function DocumentViewer({
   )
 }
 
-// ─── Extracted pages panel (Phase 5 workspace/debug tooling) ──────────────────
+// ─── Extracted pages panel (Phase 5 tooling + Phase 10 citation highlight) ───
+
+/**
+ * Render page text with the cited span wrapped in a persistent highlight.
+ * The quoted text is the REAL source text persisted by the backend, so a
+ * plain substring search locates it (first occurrence wins — chunks are
+ * single-topic, collisions are rare and benign).
+ */
+function HighlightedPageText({
+  text,
+  highlight,
+}: {
+  text: string
+  highlight: string
+}) {
+  const needle = highlight.trim()
+  if (!needle) return <>{text}</>
+
+  const at = text.indexOf(needle)
+  if (at === -1) return <>{text}</>
+
+  return (
+    <>
+      {text.slice(0, at)}
+      <mark className="source-highlight">{needle}</mark>
+      {text.slice(at + needle.length)}
+    </>
+  )
+}
 
 function PagesPanel({
   pages,
   total,
   pageCount,
+  focusPage = null,
+  highlightText = null,
 }: {
   pages: DocumentPageItem[]
   total: number
   pageCount: number | null
+  /** Citation deep-link: page to auto-expand + scroll to (FE §12). */
+  focusPage?: number | null
+  /** Citation deep-link: exact quoted span to highlight on that page. */
+  highlightText?: string | null
 }) {
-  const [expandedPage, setExpandedPage] = useState<number | null>(null)
+  const [expandedPage, setExpandedPage] = useState<number | null>(focusPage)
+  const focusRef = useRef<HTMLLIElement | null>(null)
+  const scrolledRef = useRef(false)
+
+  useEffect(() => {
+    if (focusPage == null || scrolledRef.current) return
+    // Wait until the pages data has actually arrived before scrolling.
+    if (pages.length === 0) return
+    scrolledRef.current = true
+    requestAnimationFrame(() => {
+      focusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }, [focusPage, pages.length])
 
   return (
     <section className="card workspace-pages" aria-label="Extracted pages">
@@ -235,6 +299,12 @@ function PagesPanel({
             : `${total} page${total === 1 ? '' : 's'}`}
         </span>
       </div>
+
+      {highlightText && focusPage != null && (
+        <div className="citation-focus-banner">
+          Showing the passage cited in your answer (page {focusPage}).
+        </div>
+      )}
 
       {total === 0 ? (
         <div className="empty-state">
@@ -248,8 +318,13 @@ function PagesPanel({
           {pages.map((page) => {
             const expanded = expandedPage === page.page_number
             const snippet = page.text.trim().slice(0, 160)
+            const isFocus = focusPage === page.page_number
             return (
-              <li key={page.page_number} className="pages-item">
+              <li
+                key={page.page_number}
+                className={`pages-item${isFocus ? ' pages-item-focus' : ''}`}
+                ref={isFocus ? focusRef : undefined}
+              >
                 <button
                   type="button"
                   className="pages-item-head"
@@ -273,7 +348,13 @@ function PagesPanel({
                   </span>
                 </button>
                 {expanded && (
-                  <pre className="pages-item-text">{page.text || '(no text)'}</pre>
+                  <pre className="pages-item-text">
+                    {isFocus && highlightText ? (
+                      <HighlightedPageText text={page.text || ''} highlight={highlightText} />
+                    ) : (
+                      page.text || '(no text)'
+                    )}
+                  </pre>
                 )}
               </li>
             )

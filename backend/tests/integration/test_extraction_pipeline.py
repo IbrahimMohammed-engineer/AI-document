@@ -58,8 +58,15 @@ from app.repositories.user_repository import OrganizationRepository, UserReposit
 from app.workers.jobs import reconciliation_sweep  # noqa: F401 (harness parity)
 from app.workers.jobs import run_processing_job
 
-# FK-safe delete order for the tables these tests touch
+# FK-safe delete order for the tables these tests touch. Citations/messages
+# come FIRST: citations RESTRICT-delete against cited chunks (Phase 10);
+# feedback/conversations precede users (Phase 11 FK policy).
 _TABLES_TO_CLEAN = (
+    "message_feedback",
+    "citations",
+    "messages",
+    "conversation_documents",
+    "conversations",
     "document_chunks",
     "document_sections",
     "document_pages",

@@ -90,6 +90,8 @@ def build_generation_messages(
     context_bundle: ContextBundle,
     history: Sequence[LLMMessage],
     question: str,
+    *,
+    extra_instruction: str | None = None,
 ) -> list[LLMMessage]:
     """Assemble the final message list.
 
@@ -102,6 +104,10 @@ def build_generation_messages(
                         to the configured turn bound here (single place).
         question:       The user's ORIGINAL message — NOT the rewritten
                         retrieval query (Backend §28 drift-guard invariant).
+        extra_instruction: Optional additional instruction appended to the
+                        user message — used by the Phase 10 citation-emphasis
+                        regeneration (one bounded retry, Backend §36).  Still
+                        centralized HERE: no other code path assembles prompts.
     """
     settings = get_settings()
     bounded_history = list(history[-(settings.llm_history_turns * 2):])
@@ -116,6 +122,8 @@ def build_generation_messages(
         f"{context_bundle.prompt_text}\n\n"
         f"USER QUESTION\n{question}"
     )
+    if extra_instruction:
+        user_content += f"\n\n{extra_instruction}"
 
     return [
         LLMMessage(role="system", content=SYSTEM_PROMPT),
@@ -140,8 +148,15 @@ async def generate_answer(
     question: str,
     *,
     provider: LLMProvider | None = None,
+    extra_instruction: str | None = None,
 ) -> GeneratedAnswer:
-    """Non-streaming generation (evaluation harness / fast paths)."""
+    """Non-streaming generation (evaluation harness / Phase 10 regeneration).
+
+    The regeneration path (Backend §36) is non-streaming by design: it is an
+    internal bounded retry whose output replaces the streamed draft only
+    after validation passes — a partial second stream to the client would
+    duplicate text.
+    """
     import time
 
     from app.infrastructure.llm import get_llm_provider
@@ -150,7 +165,9 @@ async def generate_answer(
     if llm is None:
         raise LLMProviderError("No LLM provider configured", code="LLM_PROVIDER_UNAVAILABLE")
 
-    messages = build_generation_messages(context_bundle, history, question)
+    messages = build_generation_messages(
+        context_bundle, history, question, extra_instruction=extra_instruction
+    )
     start = time.perf_counter()
     response = await llm.generate(messages, stream=False, **_generation_params())
     return GeneratedAnswer(

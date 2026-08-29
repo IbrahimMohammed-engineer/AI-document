@@ -75,6 +75,7 @@ class SourceBlock:
     document_id: str
     document_version_id: str
     document_name: str
+    page_id: str                     # citation page anchor (Phase 10)
     page_number: int
     section_title: str | None
     content: str
@@ -190,6 +191,7 @@ def build_context(
             document_id=result.document_id,
             document_version_id=result.document_version_id,
             document_name=result.document_name,
+            page_id=result.page_id,
             page_number=result.page_number,
             section_title=result.section_title,
             content=result.content,

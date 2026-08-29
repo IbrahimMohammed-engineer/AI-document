@@ -225,10 +225,17 @@ async def redis_client(async_redis_url) -> AsyncGenerator[aioredis.Redis, None]:
 # ─── API app fixtures (httpx ASGI client with dependency overrides) ──────────
 
 # FK-safe delete order for per-test cleanup. Roles/permissions are seeded by
-# migration 002 and must survive — only tenant data is wiped. The document
-# tables are included so cleanup stays correct even when earlier test files
-# (e.g. the embedding-stage tests) committed document rows.
+# migration 002 and must survive — only tenant data is wiped. Citations and
+# messages come FIRST: citations RESTRICT-delete against cited chunks/pages/
+# versions (Phase 10 FK policy), so they must be gone before the document
+# tables are wiped. Feedback/messages precede conversations (CASCADE would
+# handle it, but explicit order documents the dependency chain).
 _CLEANUP_TABLES = (
+    "message_feedback",
+    "citations",
+    "messages",
+    "conversation_documents",
+    "conversations",
     "document_chunks",
     "document_sections",
     "document_pages",

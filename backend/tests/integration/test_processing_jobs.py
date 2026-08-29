@@ -49,8 +49,14 @@ from app.repositories.user_repository import OrganizationRepository, UserReposit
 from app.services.document_service import DocumentService
 from app.workers.jobs import reconciliation_sweep, run_processing_job
 
-# FK-safe delete order for the tables these tests touch
+# FK-safe delete order for the tables these tests touch. Citations/messages
+# come FIRST: citations RESTRICT-delete against cited chunks (Phase 10).
 _TABLES_TO_CLEAN = (
+    "message_feedback",
+    "citations",
+    "messages",
+    "conversation_documents",
+    "conversations",
     "document_chunks",
     "document_sections",
     "document_pages",

@@ -1,2 +1,6 @@
 export { AskPage } from './AskPage'
 export { ScopeSelector } from './ScopeSelector'
+export { CitationBadge } from './CitationBadge'
+export { CitationList } from './CitationList'
+export { CitedAnswer } from './CitedAnswer'
+export { SourcePreview } from './SourcePreview'

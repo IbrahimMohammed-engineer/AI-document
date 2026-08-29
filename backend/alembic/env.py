@@ -40,6 +40,14 @@ from app.models.document import (  # noqa: F401
     DocumentTag,
     DocumentVersion,
 )
+# Phase 10 — messages + citations models
+from app.models.message import Citation, Message  # noqa: F401
+# Phase 11 — conversation models
+from app.models.conversation import (  # noqa: F401
+    Conversation,
+    ConversationDocument,
+    MessageFeedback,
+)
 
 # ─── Alembic Config ───────────────────────────────────────────────────────────
 

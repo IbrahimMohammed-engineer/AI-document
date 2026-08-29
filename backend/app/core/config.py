@@ -310,6 +310,44 @@ class Settings(BaseSettings):
         description="Reciprocal Rank Fusion constant k",
     )
 
+    # ─── Citations + source validation (Phase 10) ─────────────────────────────
+    # Master switch for the claim-validation stage (Backend §36).  Disabling
+    # it degrades to Phase 9 behaviour (extract + resolve only) — used by the
+    # evaluation harness to measure validation's effect in isolation.
+    citation_validation_enabled: bool = True
+    # The whole-chunk quote shortcut: chunks at or under this many characters
+    # are quoted in full (char_start=0, char_end=len) — chunks are already
+    # sized to a single retrieval-relevant unit (Backend §35), so a span
+    # search only pays off on longer chunks.
+    citation_quoted_span_max_chars: int = 400
+    # Entailment-check budget per answer (Backend §36): the verification is
+    # a deliberate, BOUNDED cost — one fast LLM call per claim–citation pair,
+    # capped at this many checks per answer (checks beyond the cap are
+    # skipped and recorded as unverified → groundedness degrades to partial).
+    citation_entailment_max_checks: int = 5
+    # Regeneration loop bound (Backend §36): one retry with citation emphasis
+    # when central claims are uncited/unsupported — never an unbounded loop.
+    citation_regeneration_max_retries: int = 1
+    # Central-claim threshold: when MORE than this fraction of factual
+    # sentences are uncited (or unsupported), the answer is regenerated with
+    # citation emphasis instead of stripping individual sentences.
+    citation_regenerate_uncited_ratio: float = 0.5
+
+    # ─── Conversations + streaming (Phase 11) ─────────────────────────────────
+    # Keep-alive comment cadence on SSE streams (Backend §37): proxies/LBs
+    # time out apparently-idle connections; a silent retrieval/entailment
+    # stage emits `: keep-alive` comments at this interval.
+    sse_heartbeat_seconds: float = 15.0
+    # Processing-SSE correctness fallback: the relay (Redis pub/sub) wakes
+    # the stream instantly, and the authoritative processing_jobs state is
+    # also re-read on this slow timer so missed pub/sub messages cost at
+    # most one interval (Backend §37 — Redis is disposable here).
+    stream_poll_seconds: float = 2.0
+    # Stop-flag TTL (Backend §37): `POST /chat/messages/{id}/stop` sets a
+    # message-scoped key; it expires on its own when the target already
+    # finished (or never started) — no manual cleanup, no unbounded growth.
+    chat_stop_flag_ttl_seconds: int = 300
+
     # ─── CORS ─────────────────────────────────────────────────────────────────
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 

@@ -438,6 +438,7 @@ class HybridRetriever:
             document_id=chunk.document_id,
             document_version_id=chunk.document_version_id,
             document_name=chunk.document_name,
+            page_id=chunk.page_id,
             page_number=chunk.page_number,
             section_title=chunk.section_title,
             chunk_index=chunk.chunk_index,

@@ -201,6 +201,12 @@ def create_app() -> FastAPI:
     from app.api import auth
     app.include_router(auth.router)
 
+    # Phase 11 — processing SSE streams (registered BEFORE the documents
+    # router so the multiplexed GET /documents/stream wins over the
+    # /documents/{id} detail route)
+    from app.api.document_streams import router as document_streams_router
+    app.include_router(document_streams_router)
+
     # Phase 3 — Documents + Collections
     from app.api.documents import collections_router, router as documents_router
     app.include_router(documents_router)
@@ -213,6 +219,10 @@ def create_app() -> FastAPI:
     # Phase 9 — Ask AI (standalone RAG pipeline, SSE)
     from app.api.ask import router as ask_router
     app.include_router(ask_router)
+
+    # Phase 11 — Conversations (persistent scoped streaming chat)
+    from app.api.chat import router as chat_router
+    app.include_router(chat_router)
 
     return app
 

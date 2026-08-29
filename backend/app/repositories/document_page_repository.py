@@ -56,6 +56,20 @@ class DocumentPageRepository(BaseRepository[DocumentPage]):
         )
         return result.scalar_one()
 
+    async def get_for_version(
+        self,
+        document_version_id: str,
+        page_number: int,
+    ) -> DocumentPage | None:
+        """One page of a version (citation source panel — Phase 10)."""
+        result = await self._session.execute(
+            select(DocumentPage).where(
+                DocumentPage.document_version_id == document_version_id,
+                DocumentPage.page_number == page_number,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def list_for_version(
         self,
         document_version_id: str,

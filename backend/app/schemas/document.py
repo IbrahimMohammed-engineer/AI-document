@@ -292,6 +292,28 @@ class DocumentPagesResponse(BaseModel):
     items: list[DocumentPageItem]
 
 
+# ── Page content for the citation source panel (Phase 10) ────────────────────
+
+class DocumentPageContentResponse(BaseModel):
+    """GET /documents/{id}/content?version=&page= — one page for source rendering.
+
+    The citation source panel fetches exactly the cited page (FE §6.7/§12):
+    text plus the page geometry that normalizes any highlight overlay.
+    404 when the page has no extracted content yet (never a partial guess).
+    """
+    document_id: str
+    version_id: str
+    version_number: int
+    status: str
+    page_number: int
+    page_count: Optional[int] = None
+    text: str
+    ocr_used: bool
+    ocr_failed: bool = False
+    width: Optional[float] = None
+    height: Optional[float] = None
+
+
 # ── Table of contents (Phase 6) ───────────────────────────────────────────────
 
 class TocNode(BaseModel):

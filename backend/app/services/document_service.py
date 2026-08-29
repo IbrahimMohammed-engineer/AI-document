@@ -56,6 +56,7 @@ from app.schemas.document import (
     DocumentListItem,
     DocumentListResponse,
     DocumentMetadataUpdate,
+    DocumentPageContentResponse,
     DocumentPageItem,
     DocumentPagesResponse,
     DocumentResponse,
@@ -621,6 +622,56 @@ class DocumentService:
             page_count=version.page_count,
             total=total,
             items=items,
+        )
+
+    @staticmethod
+    async def get_document_page_content(
+        *,
+        document_id: str,
+        organization_id: str,
+        page_number: int,
+        version_number: int | None = None,
+        db: AsyncSession,
+    ) -> DocumentPageContentResponse:
+        """One page's extracted content for the citation source panel.
+
+        Phase 10 (roadmap Phase 10 APIs — ``GET /documents/{id}/content``):
+        the FE fetches exactly the page a citation points at, rendering the
+        quoted span in its true page context.  Permission path is identical
+        to the pages listing (org-verified document → version → page).
+        """
+        from app.repositories.document_page_repository import DocumentPageRepository
+
+        doc_repo = DocumentRepository(db)
+        ver_repo = DocumentVersionRepository(db)
+        page_repo = DocumentPageRepository(db)
+
+        doc = await doc_repo.get_by_id_for_org(document_id, organization_id)
+        if doc is None:
+            raise NotFoundError("Document not found.")
+
+        version = await ver_repo.get_for_document(doc.id, version_number)
+        if version is None:
+            raise NotFoundError("Requested version not found.")
+
+        page = await page_repo.get_for_version(version.id, page_number)
+        if page is None:
+            raise NotFoundError(
+                "Page not found (no extracted content for this page yet)."
+            )
+
+        return DocumentPageContentResponse(
+            document_id=doc.id,
+            version_id=version.id,
+            version_number=version.version_number,
+            status=version.status,
+            page_number=page.page_number,
+            page_count=version.page_count,
+            text=page.text,
+            ocr_used=page.ocr_used,
+            ocr_failed=bool((page.page_metadata or {}).get("ocr_failed")),
+            width=float(page.width) if page.width is not None else None,
+            height=float(page.height) if page.height is not None else None,
         )
 
     # ── Table of contents (Phase 6) ───────────────────────────────────────────

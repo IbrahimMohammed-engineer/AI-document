@@ -27,6 +27,7 @@ def _result(
         document_id=f"doc-{chunk_id}",
         document_version_id=f"ver-{chunk_id}",
         document_name=document_name,
+        page_id=f"page-{chunk_id}",
         page_number=page_number,
         section_title=section_title,
         chunk_index=0,

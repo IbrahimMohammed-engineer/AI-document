@@ -1,17 +1,28 @@
 """
-API tests — POST /ask, the Phase 9 orchestration endpoint.
+API tests — POST /ask, the Phase 9–10 orchestration endpoint.
 
 All providers are stubbed at the infrastructure boundary (Backend §58):
 the tests verify ORCHESTRATION correctness, not model quality.  Requires
 testcontainers (real Postgres for the retrieval half of the pipeline).
 
-Tests (roadmap Phase 9 §Testing):
+Tests (roadmap Phase 9–10 §Testing):
   - unauthenticated → 401; empty question → 422
   - happy path: SSE event sequence token* → sources → done with a source
     list matching the seeded corpus (groundedness=grounded)
   - insufficient-evidence path: success (NOT an HTTP error), empty
     sources, done with groundedness=ungrounded, and ZERO token events
     (generation is never attempted — Backend §36/§48)
+  - Phase 10: done payload carries resolved citations whose page/section/
+    document match the seeded corpus; the assistant message + citations
+    rows persist atomically (message_id set)
+  - Phase 10: an invalid reference ([3] with 1 source) is stripped from
+    the answer and never persisted
+  - Phase 10: an unsupported claim (entailment verdict "no") is stripped —
+    a single-claim answer degrades to the honest ungrounded response
+  - Phase 10: unparseable entailment output degrades groundedness to
+    "partial" (claims are never silently passed)
+  - Phase 10: central uncited answers trigger ONE citation-emphasis
+    regeneration (done.regenerated=true; emphasis instruction in prompt 2)
   - injection fixture: a chunk containing "Ignore previous instructions…"
     reaches the LLM wrapped in SOURCE-block evidence delimiters and the
     pipeline completes as a normal evidence-cited answer (seed of the
@@ -255,6 +266,7 @@ class TestAskPipeline:
         assert done_payload["intent"] == "QUESTION"
         assert set(done_payload["latency_ms"]) == {
             "analyzer", "rewrite", "retrieval", "context", "generation",
+            "citations",
         }
         assert done_payload["used_reranker"] is True  # stub reranker produced scores
 
@@ -324,9 +336,16 @@ class TestPromptInjectionFoundations:
         )
 
         responder_messages: list[list[LLMMessage]] = []
-        provider = StubLLMProvider(responder=lambda msgs: (
-            responder_messages.append(list(msgs)) or "The approval process has four stages. [1]"
-        ))
+
+        def _injection_responder(msgs):
+            responder_messages.append(list(msgs))
+            # The entailment verifier also calls the provider (Phase 10) —
+            # it must return structured support for the injected evidence.
+            if "CLAIM:" in msgs[-1].content:
+                return '{"verdict": "yes", "reason": "evidence states it"}'
+            return "The approval process has four stages. [1]"
+
+        provider = StubLLMProvider(responder=_injection_responder)
         set_llm_provider(provider)
 
         status, events = await _stream_sse(app_client, token, {
@@ -339,11 +358,15 @@ class TestPromptInjectionFoundations:
         assert len(events[-2][1]["sources"]) == 1  # evidence cited normally
 
         # The prompt handed to the LLM for GENERATION is the last recorded
-        # call (earlier recordings are the analyzer's degraded attempts):
+        # call carrying SOURCE context (Phase 10 added entailment-check calls
+        # after generation — those use the CLAIM: template, not SOURCE N):
         # the injected text sits inside the SOURCE 1 evidence block, the
         # instruction hierarchy is present, and the user's question is the
         # original words.
-        generation_messages = responder_messages[-1]
+        generation_messages = next(
+            msgs for msgs in reversed(responder_messages)
+            if "SOURCE 1" in msgs[-1].content
+        )
         prompt = "\n".join(m.content for m in generation_messages)
         assert "SOURCE 1" in prompt
         assert "Ignore previous instructions" in prompt  # present AS evidence
@@ -389,3 +412,237 @@ class TestLLMUnavailable:
         error = next(data for name, data in events if name == "error")
         assert error["code"] == "LLM_UNAVAILABLE"
         assert names[-1] == "error"  # terminal
+
+
+# ── Phase 10 — citations, validation, atomic persistence ──────────────────────
+
+_CHUNK = (
+    "The approval process requires four sequential stages: submission, "
+    "manager review, compliance review, and final sign-off."
+)
+
+
+def _rag_responder(answers: list[str], entailment: str = "yes"):
+    """A stub responder distinguishing the three LLM call shapes:
+    analyzer (JSON prompt), entailment (CLAIM: marker), generation (SOURCE)."""
+    generation_calls = {"n": 0}
+    emphasis_seen = {"v": False}
+
+    def _respond(messages) -> str:
+        content = messages[-1].content
+        if "CLAIM:" in content:
+            return f'{{"verdict": "{entailment}", "reason": "stub"}}'
+        if "SOURCE 1" in content or "SOURCE blocks" in content:
+            idx = min(generation_calls["n"], len(answers) - 1)
+            answer = answers[idx]
+            generation_calls["n"] += 1
+            if "every factual statement carries a citation" in content.lower():
+                emphasis_seen["v"] = True
+            return answer
+        # Analyzer / rewriter fast calls — a parse failure degrades safely.
+        return "not json"
+
+    return _respond, generation_calls, emphasis_seen
+
+
+async def _count_rows(app_session_factory, sql: str, params: dict) -> int:
+    async with app_session_factory() as session:
+        return (await session.execute(text(sql), params)).scalar_one()
+
+
+@pytest.mark.integration
+class TestCitations:
+
+    @pytest.mark.asyncio
+    async def test_done_carries_resolved_citations_and_persists_atomically(
+        self, app_client, app_session_factory
+    ):
+        token = await _register_and_login(app_client)
+        user_id = await _current_user_id(app_client, token)
+        org_id = await _get_org_id(app_session_factory, user_id)
+        await _seed_document_with_chunks(
+            app_session_factory, org_id, user_id, [_CHUNK]
+        )
+
+        respond, _, _ = _rag_responder(
+            ["The approval process requires four sequential stages. [1]"],
+            entailment="yes",
+        )
+        set_llm_provider(StubLLMProvider(responder=respond))
+        try:
+            status, events = await _stream_sse(app_client, token, {
+                "question": "What is the approval process?",
+            })
+        finally:
+            set_llm_provider(StubLLMProvider())
+
+        assert status == 200
+        done = events[-1][1]
+        assert done["groundedness"] == "grounded"
+        assert done["message_id"], "assistant message persisted atomically"
+
+        # Citation payload: page/section/document verifiably match the source
+        citations = done["citations"]
+        assert len(citations) == 1
+        c = citations[0]
+        assert c["index"] == 1
+        assert c["document_name"] == "Marketing Policy 2026"
+        assert c["page"] == 1
+        assert c["version_number"] == 1
+        # quoted_text is REAL source text from the chunk (≤400 chars → full)
+        assert c["text"] == _CHUNK
+        assert c["char_start"] == 0
+        assert c["char_end"] == len(_CHUNK)
+
+        # The validated answer replaces the raw stream client-side
+        assert done["answer"] == "The approval process requires four sequential stages. [1]"
+
+        # Atomic persistence: exactly one message + one citation row
+        assert await _count_rows(
+            app_session_factory,
+            "SELECT COUNT(*) FROM citations WHERE message_id = :id",
+            {"id": done["message_id"]},
+        ) == 1
+
+    @pytest.mark.asyncio
+    async def test_invalid_reference_stripped_and_never_persisted(
+        self, app_client, app_session_factory
+    ):
+        token = await _register_and_login(app_client)
+        user_id = await _current_user_id(app_client, token)
+        org_id = await _get_org_id(app_session_factory, user_id)
+        await _seed_document_with_chunks(
+            app_session_factory, org_id, user_id, [_CHUNK]
+        )
+
+        respond, _, _ = _rag_responder(
+            ["First fact. [1] Fabricated fact. [3]"],
+            entailment="yes",
+        )
+        set_llm_provider(StubLLMProvider(responder=respond))
+        try:
+            status, events = await _stream_sse(app_client, token, {
+                "question": "What is the approval process?",
+            })
+        finally:
+            set_llm_provider(StubLLMProvider())
+
+        done = events[-1][1]
+        # "Fabricated fact." is factual + uncited → stripped (minor) → partial
+        assert done["groundedness"] == "partial"
+        assert "Fabricated fact" not in done["answer"]
+        assert [c["index"] for c in done["citations"]] == [1]
+        assert done["stripped_claims"] == 1
+        assert await _count_rows(
+            app_session_factory,
+            "SELECT COUNT(*) FROM citations WHERE message_id = :id",
+            {"id": done["message_id"]},
+        ) == 1  # the [3] row must not exist
+
+    @pytest.mark.asyncio
+    async def test_unsupported_claim_stripped_to_ungrounded(
+        self, app_client, app_session_factory
+    ):
+        """Entailment verdict 'no' → the claim is stripped; a single-claim
+        answer empties into the honest ungrounded response (success-shaped)."""
+        token = await _register_and_login(app_client)
+        user_id = await _current_user_id(app_client, token)
+        org_id = await _get_org_id(app_session_factory, user_id)
+        await _seed_document_with_chunks(
+            app_session_factory, org_id, user_id, [_CHUNK]
+        )
+
+        respond, _, _ = _rag_responder(
+            ["The approval process has seventeen secret stages. [1]"],
+            entailment="no",
+        )
+        set_llm_provider(StubLLMProvider(responder=respond))
+        try:
+            status, events = await _stream_sse(app_client, token, {
+                "question": "What is the approval process?",
+            })
+        finally:
+            set_llm_provider(StubLLMProvider())
+
+        names = [name for name, _ in events]
+        assert "error" not in names
+        done = events[-1][1]
+        assert done["groundedness"] == "ungrounded"
+        assert "couldn't find enough information" in done["message"]
+        assert done["citations"] == []
+        assert done["stripped_claims"] == 1
+        # The stripped message still persists (groundedness=ungrounded, no rows)
+        assert done["message_id"]
+        assert await _count_rows(
+            app_session_factory,
+            "SELECT groundedness FROM messages WHERE id = :id",
+            {"id": done["message_id"]},
+        ) == "ungrounded"
+        assert await _count_rows(
+            app_session_factory,
+            "SELECT COUNT(*) FROM citations WHERE message_id = :id",
+            {"id": done["message_id"]},
+        ) == 0
+
+    @pytest.mark.asyncio
+    async def test_unparseable_entailment_degrades_to_partial(
+        self, app_client, app_session_factory
+    ):
+        """Provider/parse failure → claim kept but groundedness partial —
+        never silently passed (roadmap Phase 10 error handling)."""
+        token = await _register_and_login(app_client)
+        user_id = await _current_user_id(app_client, token)
+        org_id = await _get_org_id(app_session_factory, user_id)
+        await _seed_document_with_chunks(
+            app_session_factory, org_id, user_id, [_CHUNK]
+        )
+
+        respond, _, _ = _rag_responder(
+            ["The approval process requires four sequential stages. [1]"],
+            entailment="total-garbage",  # unparseable verdict
+        )
+        set_llm_provider(StubLLMProvider(responder=respond))
+        try:
+            status, events = await _stream_sse(app_client, token, {
+                "question": "What is the approval process?",
+            })
+        finally:
+            set_llm_provider(StubLLMProvider())
+
+        done = events[-1][1]
+        assert done["groundedness"] == "partial"
+        assert "four sequential stages" in done["answer"]  # kept, degraded
+        assert done["entailment_checks"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_central_uncited_answer_regenerates_once(
+        self, app_client, app_session_factory
+    ):
+        """No citations at all → central failure → ONE bounded regeneration
+        with the citation-emphasis instruction; the retry succeeds."""
+        token = await _register_and_login(app_client)
+        user_id = await _current_user_id(app_client, token)
+        org_id = await _get_org_id(app_session_factory, user_id)
+        await _seed_document_with_chunks(
+            app_session_factory, org_id, user_id, [_CHUNK]
+        )
+
+        respond, gen_calls, emphasis_seen = _rag_responder([
+            "The approval process requires four sequential stages.",  # uncited
+            "The approval process requires four sequential stages. [1]",  # retry
+        ])
+        set_llm_provider(StubLLMProvider(responder=respond))
+        try:
+            status, events = await _stream_sse(app_client, token, {
+                "question": "What is the approval process?",
+            })
+        finally:
+            set_llm_provider(StubLLMProvider())
+
+        done = events[-1][1]
+        assert done["regenerated"] is True
+        assert done["groundedness"] == "grounded"
+        assert gen_calls["n"] == 2, "regeneration is bounded to exactly one retry"
+        assert emphasis_seen["v"], "retry prompt carried the citation emphasis"
+        assert [c["index"] for c in done["citations"]] == [1]
+        assert done["message_id"]
