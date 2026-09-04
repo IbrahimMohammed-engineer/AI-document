@@ -20,6 +20,7 @@ import {
   ResetPasswordPage,
 } from '@/features/auth'
 import { DocumentWorkspace } from '@/features/documents'
+import { ComparisonPage } from '@/features/documents'
 import { AskPage } from '@/features/ask'
 
 // ── Placeholder page components ───────────────────────────────────────────────
@@ -195,8 +196,9 @@ export function App() {
         <Route path="ask" element={<AskPage />} />
         <Route path="ask/:conversationId" element={<PlaceholderPage title="Conversation" description="AI Chat with citation rendering — Phase 9" />} />
         <Route path="search" element={<PlaceholderPage title="Search" description="Hybrid semantic + keyword search — Phase 8" />} />
-        <Route path="compare" element={<PlaceholderPage title="Document Comparison" description="Diff two document versions — Phase 10" />} />
-        <Route path="compare/:comparisonId" element={<PlaceholderPage title="Comparison Results" description="Change detection with severity — Phase 10" />} />
+        {/* Phase 12 — Document comparison (version picker + live results) */}
+        <Route path="compare" element={<ComparisonPage />} />
+        <Route path="compare/:comparisonId" element={<ComparisonPage />} />
         <Route path="analytics" element={<PlaceholderPage title="Analytics" description="Usage metrics, processing stats, AI quality — Phase 10" />} />
         <Route path="settings" element={<PlaceholderPage title="Settings" description="Organization, users, roles, integrations — Phase 3+" />} />
         <Route path="settings/*" element={<PlaceholderPage title="Settings" description="Organization settings — Phase 3+" />} />

@@ -1,5 +1,5 @@
 /**
- * Document processing UI (Phases 4–6).
+ * Document processing UI (Phases 4–6) + Comparison UI (Phase 12).
  *
  * Building blocks consumed by the Documents screens:
  *  - ProcessingStatusBadge    — table-row status chip (+ retry on FAILED)
@@ -10,12 +10,14 @@
  *                               OCR warning; Phase 6: real TOC panel)
  *  - TocPanel                 — section tree (Phase 6) with the "No structure
  *                               detected" fallback state (FE §6.5)
+ *  - ComparisonPage           — version comparison workflow (Phase 12)
  */
 export { ProcessingStatusBadge } from './ProcessingStatusBadge'
 export { ProcessingStatusTracker } from './ProcessingStatusTracker'
 export { ProcessingIndicator } from './ProcessingIndicator'
 export { DocumentWorkspace } from './DocumentWorkspace'
 export { TocPanel } from './TocPanel'
+export { ComparisonPage } from './ComparisonPage'
 export {
   JOB_STATUS_LABELS,
   JOB_TYPE_LABELS,
@@ -27,3 +29,4 @@ export {
 } from './processingStatus'
 export type { StatusTone } from './processingStatus'
 import './processing.css'
+import './comparison.css'
