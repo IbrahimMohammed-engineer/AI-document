@@ -523,3 +523,229 @@ async def test_comparison_change_check_constraints_enforced(
         finally:
             await conn.execute(sa.text("ROLLBACK TO SAVEPOINT seed"))
     await engine.dispose()
+
+
+# ── Phase 13 — conflicts (migration 013, plan §9) ─────────────────────────────
+
+@pytest.mark.integration
+async def test_conflict_tables_and_constraints(async_database_url, run_migrations):
+    """Migration 013 must create conflicts / conflict_statements per plan §9
+    with the CHECK constraints, the resolution-fields invariant, the unique
+    (conflict_id, chunk_id) statement constraint, the nullable
+    document_version_id + checkpoint column + version-required CHECK on
+    processing_jobs, and the RESTRICT statement FK policy."""
+    engine = create_async_engine(async_database_url, echo=False)
+    async with engine.connect() as conn:
+        tables = {
+            row[0]
+            for row in (
+                await conn.execute(sa.text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public'"
+                ))
+            ).fetchall()
+        }
+        assert {"conflicts", "conflict_statements"} <= tables
+
+        constraints = {
+            row[0]
+            for row in (
+                await conn.execute(sa.text(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conrelid IN ("
+                    "'conflicts'::regclass, "
+                    "'conflict_statements'::regclass, "
+                    "'processing_jobs'::regclass)"
+                ))
+            ).fetchall()
+        }
+        assert {
+            "ck_conflicts_severity",
+            "ck_conflicts_status",
+            "ck_conflicts_detection_method",
+            "ck_conflicts_resolution_fields",
+            "uq_conflict_statements_conflict_chunk",
+            "ck_processing_jobs_version_required",
+        } <= constraints
+
+        # FK policy (plan §9.2): the statement's provenance chains are
+        # RESTRICT (citation-grade — evidence cannot be silently deleted),
+        # while conflict_id is CASCADE (statements die with their conflict).
+        fks = {
+            row[0]: row[1]
+            for row in (
+                await conn.execute(sa.text(
+                    """
+                    SELECT tc.constraint_name, rc.delete_rule
+                    FROM information_schema.referential_constraints rc
+                    JOIN information_schema.table_constraints tc
+                      ON tc.constraint_name = rc.constraint_name
+                     AND tc.table_name = 'conflict_statements'
+                    """
+                ))
+            ).fetchall()
+        }
+        for name, rule in fks.items():
+            expected = (
+                "CASCADE"
+                if name == "conflict_statements_conflict_id_fkey"
+                else "RESTRICT"
+            )
+            assert rule == expected, (
+                f"{name} delete rule must be {expected}, got {rule}"
+            )
+
+        # processing_jobs.document_version_id is now nullable and checkpoint exists
+        columns = {
+            row[0]: (row[1], row[2])
+            for row in (
+                await conn.execute(sa.text(
+                    "SELECT column_name, is_nullable, data_type "
+                    "FROM information_schema.columns "
+                    "WHERE table_name = 'processing_jobs'"
+                ))
+            ).fetchall()
+        }
+        assert columns["document_version_id"][0] == "YES"
+        assert columns["checkpoint"][1] == "jsonb"
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+async def test_conflict_check_constraints_enforced(async_database_url, run_migrations):
+    """Functional CHECK verification (plan §23 Task 2 acceptance):
+    invalid status/severity/detection_method values are rejected; the
+    resolution-fields invariant rejects an OPEN row with resolver data and a
+    REVIEWED row without it; the version-required CHECK rejects a
+    non-CONFLICT_SCAN job with NULL document_version_id while allowing a
+    CONFLICT_SCAN one; conflict:resolve is seeded to Admin/Editor, never
+    Viewer.  All inside a transaction that is rolled back."""
+    engine = create_async_engine(async_database_url, echo=False)
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("SAVEPOINT seed"))
+        try:
+            org_id = str((await conn.execute(sa.text(
+                "INSERT INTO organizations (id, name, slug) "
+                "VALUES (gen_random_uuid(), 'mig13-org', 'mig13-org') RETURNING id"
+            ))).scalar_one())
+
+            async def _must_raise(stmt: str, label: str) -> None:
+                await conn.execute(sa.text("SAVEPOINT bad"))
+                raised = False
+                try:
+                    await conn.execute(sa.text(stmt))
+                except Exception:
+                    raised = True
+                finally:
+                    await conn.execute(sa.text("ROLLBACK TO SAVEPOINT bad"))
+                assert raised, f"{label} must be rejected"
+
+            base = "INSERT INTO conflicts (organization_id, topic, severity, status, detection_method"
+            await _must_raise(
+                base + f") VALUES ('{org_id}', 't', 'HUGE', 'OPEN', 'BACKGROUND_SCAN')",
+                "invalid severity",
+            )
+            await _must_raise(
+                base + f") VALUES ('{org_id}', 't', 'MAJOR', 'FROZEN', 'BACKGROUND_SCAN')",
+                "invalid status",
+            )
+            await _must_raise(
+                base + f") VALUES ('{org_id}', 't', 'MAJOR', 'OPEN', 'PSYCHIC')",
+                "invalid detection_method",
+            )
+            await _must_raise(
+                base + ", resolved_by, resolved_at) VALUES ("
+                f"'{org_id}', 't', 'MAJOR', 'OPEN', 'BACKGROUND_SCAN', "
+                "gen_random_uuid(), now())",
+                "OPEN row carrying resolver data",
+            )
+            await _must_raise(
+                base + f") VALUES ('{org_id}', 't', 'MAJOR', 'REVIEWED', 'BACKGROUND_SCAN')",
+                "REVIEWED row without resolver data",
+            )
+
+            # Control: a minimal valid OPEN conflict inserts
+            conflict_id = str((await conn.execute(sa.text(
+                "INSERT INTO conflicts (organization_id, topic, severity, status, "
+                "detection_method) VALUES (:org, 't', 'MAJOR', 'OPEN', "
+                "'BACKGROUND_SCAN') RETURNING id"
+            ), {"org": org_id})).scalar_one())
+
+            # Version-required CHECK
+            await _must_raise(
+                "INSERT INTO processing_jobs (id, organization_id, "
+                "document_version_id, job_type) "
+                f"VALUES (gen_random_uuid(), '{org_id}', NULL, 'EXTRACTION')",
+                "non-CONFLICT_SCAN job with NULL document_version_id",
+            )
+            await conn.execute(sa.text(
+                "INSERT INTO processing_jobs (id, organization_id, "
+                "document_version_id, job_type, checkpoint) "
+                "VALUES (gen_random_uuid(), :org, NULL, 'CONFLICT_SCAN', NULL)"
+            ), {"org": org_id})
+
+            # Permission seeding: conflict:resolve granted to Admin + Editor,
+            # never Viewer
+            grants = {
+                row[0]
+                for row in (
+                    await conn.execute(sa.text(
+                        "SELECT r.name FROM role_permissions rp "
+                        "JOIN permissions p ON p.id = rp.permission_id "
+                        "JOIN roles r ON r.id = rp.role_id "
+                        "WHERE p.key = 'conflict:resolve' AND r.is_system = true"
+                    ))
+                ).fetchall()
+            }
+            assert grants == {"Admin", "Editor"}, (
+                f"conflict:resolve must be granted to Admin+Editor only, got {grants}"
+            )
+        finally:
+            await conn.execute(sa.text("ROLLBACK TO SAVEPOINT seed"))
+    await engine.dispose()
+
+
+@pytest.mark.integration
+async def test_migration_013_downgrade_upgrade_cycle(async_database_url, run_migrations):
+    """downgrade -1 (drop 013) then upgrade head runs clean (plan §34 item 2)."""
+    import os
+    import subprocess
+    import sys
+
+    cwd = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sync_url = async_database_url.replace("+asyncpg", "+psycopg2")
+
+    def _alembic(*args: str):
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            env={**os.environ, "MIGRATION_DATABASE_URL": sync_url},
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+
+    down = _alembic("downgrade", "-1")
+    assert down.returncode == 0, (
+        f"alembic downgrade -1 failed:\n{down.stdout}\n{down.stderr}"
+    )
+    up = _alembic("upgrade", "head")
+    assert up.returncode == 0, (
+        f"alembic upgrade head failed:\n{up.stdout}\n{down.stderr}"
+    )
+
+    engine = create_async_engine(async_database_url, echo=False)
+    async with engine.connect() as conn:
+        tables = {
+            row[0]
+            for row in (
+                await conn.execute(sa.text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public'"
+                ))
+            ).fetchall()
+        }
+    await engine.dispose()
+    assert {"conflicts", "conflict_statements"} <= tables, (
+        "conflict tables must exist again after the downgrade/upgrade cycle"
+    )

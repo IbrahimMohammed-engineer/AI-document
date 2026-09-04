@@ -185,12 +185,18 @@ async def stream_answer(
     question: str,
     *,
     provider: LLMProvider | None = None,
+    extra_instruction: str | None = None,
 ) -> AsyncIterator[LLMChunk]:
     """Stream generation as token deltas (the Ask AI default path).
 
     Token/cost capture (roadmap Phase 9 step 10): the caller accumulates
     the terminal chunk's usage and attributes it to the org + request —
     logged now, persisted with messages in Phase 11.
+
+    ``extra_instruction`` (Phase 13): an optional deterministic app-supplied
+    note appended to the user message (e.g. the inline conflict-disagreement
+    acknowledgement hint, §20).  Prompt assembly stays centralized in
+    ``build_generation_messages``.
     """
     from app.infrastructure.llm import get_llm_provider
 
@@ -198,6 +204,8 @@ async def stream_answer(
     if llm is None:
         raise LLMProviderError("No LLM provider configured", code="LLM_PROVIDER_UNAVAILABLE")
 
-    messages = build_generation_messages(context_bundle, history, question)
+    messages = build_generation_messages(
+        context_bundle, history, question, extra_instruction=extra_instruction
+    )
     async for chunk in llm.generate(messages, stream=True, **_generation_params()):
         yield chunk

@@ -82,6 +82,45 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
         )
         return await self.add(job)
 
+    async def create_for_org_scan(
+        self,
+        *,
+        organization_id: str,
+        max_attempts: int = 3,
+    ) -> ProcessingJob:
+        """Insert a PENDING org-wide CONFLICT_SCAN job row (flush, no commit).
+
+        Phase 13 (§15): the scan is anchored to the ORGANIZATION, so
+        ``document_version_id`` stays NULL (the
+        ck_processing_jobs_version_required CHECK requires a version for
+        every other job type).  ``checkpoint`` starts NULL — run_scan
+        initializes it on first write.
+        """
+        job = ProcessingJob(
+            organization_id=organization_id,
+            document_version_id=None,
+            job_type="CONFLICT_SCAN",
+            status=JobStatus.PENDING.value,
+            attempts=0,
+            max_attempts=max_attempts,
+        )
+        return await self.add(job)
+
+    async def get_latest_for_org(
+        self, organization_id: str, job_type: str
+    ) -> Optional[ProcessingJob]:
+        """Most recent job of one type for an org (scan-status reads)."""
+        result = await self._session.execute(
+            select(ProcessingJob)
+            .where(
+                self._org_filter(organization_id),
+                ProcessingJob.job_type == job_type,
+            )
+            .order_by(ProcessingJob.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     # ── Reads ─────────────────────────────────────────────────────────────────
 
     async def get_for_version(
@@ -284,7 +323,13 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
 
     @staticmethod
     async def _publish_wake(job: ProcessingJob) -> None:
-        """Relay wake for this job's version channel (fail-safe — Backend §37)."""
+        """Relay wake for this job's version channel (fail-safe — Backend §37).
+
+        Org-wide jobs (CONFLICT_SCAN) have no version channel to wake —
+        the scan-status endpoint polls processing_jobs directly.
+        """
+        if job.document_version_id is None:
+            return
         from app.infrastructure.relay import publish_job_event
 
         await publish_job_event(job.document_version_id)

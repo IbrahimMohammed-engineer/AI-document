@@ -80,6 +80,17 @@ class Settings(BaseSettings):
         description="How often the periodic reconciliation sweep runs",
     )
 
+    # ─── Conflict detection (Phase 13) ────────────────────────────────────────
+    # Nightly org-wide conflict-scan cron hour (0-23, server-local wall clock).
+    # Settings-driven like every other cron parameter (mirrors
+    # reconciliation_sweep_interval_seconds).
+    conflict_scan_hour: int = Field(
+        default=2,
+        ge=0,
+        le=23,
+        description="Hour of day the nightly CONFLICT_SCAN cron fires",
+    )
+
     # ─── Object Storage ───────────────────────────────────────────────────────
     storage_provider: Literal["minio", "s3", "azure"] = "minio"
     storage_endpoint_url: str | None = "http://localhost:9000"

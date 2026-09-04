@@ -1,9 +1,10 @@
 """
 Unit tests for pure permission evaluation (app/domain/permissions.py).
 
-Covers all 3 system roles × all 9 permission keys plus edge cases
+Covers all 3 system roles × all permission keys plus edge cases
 (no roles, multiple roles). The role→permission assignments asserted here
-mirror the seeds from migration 002 exactly.
+mirror the seeds from migrations 002 (base keys) and 013 (conflict:resolve)
+exactly.
 """
 from __future__ import annotations
 
@@ -19,7 +20,8 @@ from app.models.user import Permission, Role
 
 ALL_KEYS = [key.value for key in PermissionKey]
 
-# Mirrors migration 002 _seed_system_roles()
+# Mirrors migration 002 _seed_system_roles() + migration 013
+# _seed_conflict_permission() (Admin/Editor only — never Viewer)
 ROLE_PERMISSIONS = {
     "Admin": {
         "document:create",
@@ -28,6 +30,7 @@ ROLE_PERMISSIONS = {
         "document:delete",
         "chat:create",
         "comparison:create",
+        "conflict:resolve",
         "user:manage",
         "settings:manage",
         "analytics:read",
@@ -39,6 +42,7 @@ ROLE_PERMISSIONS = {
         "document:delete",
         "chat:create",
         "comparison:create",
+        "conflict:resolve",
         "analytics:read",
     },
     "Viewer": {
@@ -61,8 +65,8 @@ def system_role(name: str) -> Role:
 # ─── PermissionKey catalog ────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_permission_key_catalog_has_nine_entries():
-    assert len(list(PermissionKey)) == 9
+def test_permission_key_catalog_has_ten_entries():
+    assert len(list(PermissionKey)) == 10
     assert set(k.value for k in PermissionKey) == set(ALL_KEYS)
 
 
@@ -113,7 +117,7 @@ def test_viewer_denies(key: str):
 # ─── get_user_permissions ─────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_get_user_permissions_admin_returns_all_nine():
+def test_get_user_permissions_admin_returns_all_ten():
     assert get_user_permissions([system_role("Admin")]) == set(ALL_KEYS)
 
 

@@ -78,6 +78,7 @@ from app.rag.query_analyzer import analyze_query
 from app.rag.query_rewriter import rewrite_query
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
+from app.services.conflict_service import ConflictNotice, ConflictService
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,10 @@ class AskOutcome:
     entailment_checks: int = 0
     stopped: bool = False                # Phase 11: frozen mid-generation
     stop_reason: str | None = None       # "user" | "disconnect"
+    # Phase 13: deterministic inline conflict notices (§20) — populated
+    # exclusively from the DB query over the retrieved chunk set, never
+    # from LLM output, so the FE banner cannot be hallucinated.
+    conflicts: list[ConflictNotice] = field(default_factory=list)
     model: str | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -185,20 +190,24 @@ class AskStreamEvent:
     """One SSE event in the /ask response stream.
 
     ``type`` is one of:
-      token   — {"text": delta}
-      sources — {"sources": [...]}   (after generation + validation)
-      done    — terminal, carries the AskOutcome summary incl. citations[]
-      error   — mid-stream failure (LLM_UNAVAILABLE etc.); the user's
-                question is preserved client-side (persistence in Phase 11
-                makes this durable)
+      token           — {"text": delta}
+      sources         — {"sources": [...]}   (after generation + validation)
+      conflict_notice — {"conflicts": [{conflict_id, topic, severity}]}
+                        (Phase 13, immediately after retrieval — a
+                        deterministic DB query, never LLM output)
+      done            — terminal, carries the AskOutcome summary incl. citations[]
+      error           — mid-stream failure (LLM_UNAVAILABLE etc.); the user's
+                        question is preserved client-side (persistence in Phase 11
+                        makes this durable)
 
     Citations are NEVER streamed mid-generation: validity is unknowable
     until the complete answer exists and validation has run (Backend §37).
     """
 
-    type: Literal["token", "sources", "done", "error"]
+    type: Literal["token", "sources", "conflict_notice", "done", "error"]
     text: str | None = None
     sources: list[AskSource] | None = None
+    conflicts: list[ConflictNotice] | None = None
     outcome: AskOutcome | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -286,6 +295,26 @@ class AskService:
         )
         timings.retrieval_ms = int((time.perf_counter() - start) * 1000)
 
+        # ── Stage 3.5 (Phase 13): inline conflict surfacing (§20) ─────────
+        # For EVERY intent: any OPEN conflict with >= 2 chunks among the
+        # retrieved set means the retrieval itself surfaced disagreeing
+        # evidence.  Deterministic DB query — no additional authorization
+        # check needed BY DESIGN (retrieval is already permission-scoped).
+        # Populated exclusively from the DB, never from LLM output.
+        conflicts_among_sources: list[ConflictNotice] = []
+        try:
+            conflicts_among_sources = await ConflictService.find_conflicts_among_chunks(
+                organization_id=user.organization_id,
+                chunk_ids=[r.chunk_id for r in retrieval.results],
+                db=self._db,
+            )
+        except Exception:  # noqa: BLE001 — surfacing must never fail the ask
+            logger.exception("AskService: conflict-surfacing query failed (non-fatal)")
+        if conflicts_among_sources:
+            yield AskStreamEvent(
+                type="conflict_notice", conflicts=conflicts_among_sources
+            )
+
         def _partial_outcome() -> AskOutcome:
             outcome = AskOutcome(
                 question=question,
@@ -336,7 +365,20 @@ class AskService:
         completion_tokens = 0
 
         try:
-            async for chunk in stream_answer(bundle, history, question):
+            # Phase 13 (§20): when the retrieved sources disagree, a short,
+            # FULLY DETERMINISTIC app-supplied note joins the generation
+            # context — only the model's prose acknowledgment is generative.
+            conflict_instruction: str | None = None
+            if conflicts_among_sources:
+                topics = ", ".join(f"'{c.topic}'" for c in conflicts_among_sources[:3])
+                conflict_instruction = (
+                    "Note: the retrieved sources disagree on "
+                    f"{topics}. Acknowledge this disagreement in your answer "
+                    "without resolving it or picking a side."
+                )
+            async for chunk in stream_answer(
+                bundle, history, question, extra_instruction=conflict_instruction
+            ):
                 # Cancellation checkpoint BETWEEN chunks (Backend §37):
                 # abandoned/stopped requests stop costing money here.
                 if should_cancel is not None:
@@ -446,6 +488,7 @@ class AskService:
         done.groundedness = validation.groundedness
         done.answer_text = answer_text
         done.final_answer = validation.final_text
+        done.conflicts = conflicts_among_sources
         done.sources = [
             AskSource(
                 index=block.index,

@@ -47,6 +47,7 @@ from app.models.message import Message
 from app.models.user import User
 from app.rag.citations import ResolvedCitation
 from app.services.ask_service import AskCitation, AskOutcome, AskService
+from app.services.conflict_service import ConflictNotice
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
 
@@ -82,13 +83,16 @@ class ChatStreamEvent:
                  "citations","sources", ...}
     """
 
-    type: Literal["start", "token", "citation", "error", "done"]
+    type: Literal["start", "token", "citation", "conflict_notice", "error", "done"]
     conversation_id: str | None = None
     user_message_id: str | None = None
     assistant_message_id: str | None = None
     scope: "ScopeInfo | None" = None
     delta: str | None = None
     citation: AskCitation | None = None
+    # Phase 13: deterministic inline conflict notices (§20) — structured
+    # data from the DB query, never parsed from generated text.
+    conflicts: "list[ConflictNotice] | None" = None
     outcome: AskOutcome | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -482,9 +486,55 @@ class ChatService:
                     outcome=outcome,
                 )
                 return
+
+            # ── Phase 13: CONFLICT_DETECTION intent routing (§19) ────────────
+            # Deterministic query → persisted, authorized conflicts → narrated.
+            # The conversational layer orchestrates and narrates persisted
+            # results — it never independently detects a new conflict.
+            elif analysis.intent == "CONFLICT_DETECTION":
+                from app.services.conflict_service import ConflictService
+
+                accessible_ids: list[str] | None = context.resolved_document_ids
+                if accessible_ids == []:
+                    # Knowledge-base scope — the repository's private-source
+                    # exclusion filter applies (per-user authorization at the
+                    # same access-level rule every read surface uses).
+                    accessible_ids = None
+                conflicts_payload = await ConflictService.list_for_chat(
+                    organization_id=user.organization_id,
+                    accessible_document_ids=accessible_ids,
+                    requesting_user=user,
+                    topic_hint=getattr(analysis, "scope_hints", None),
+                    db=self._db,
+                )
+                if not conflicts_payload:
+                    # Deterministic, non-fabricated response — no LLM call
+                    # needed to say "none found" (§19).
+                    outcome = await self._persist_comparison_turn(
+                        user,
+                        context,
+                        content=(
+                            "I didn't find any recorded conflicts in the "
+                            "documents you have access to."
+                        ),
+                        resolved_citations=[],
+                    )
+                    yield ChatStreamEvent(type="done", outcome=outcome)
+                    return
+                outcome = await self._narrate_conflict_outcome(
+                    user, context, conflicts_payload
+                )
+                for citation in outcome.citations:
+                    yield ChatStreamEvent(type="citation", citation=citation)
+                yield ChatStreamEvent(
+                    type="done",
+                    conversation_id=context.conversation.id,
+                    outcome=outcome,
+                )
+                return
         except Exception:  # noqa: BLE001 — graceful degradation
             logger.exception(
-                "ChatService: comparison routing failed — falling through to RAG"
+                "ChatService: intent routing failed — falling through to RAG"
             )
 
         async for event in ask_service.ask_stream(
@@ -500,6 +550,12 @@ class ChatService:
                 yield ChatStreamEvent(type="token", delta=event.text or "")
             elif event.type == "citation":
                 pass  # citations arrive with the done payload AND as their own events below
+            elif event.type == "conflict_notice":
+                # Phase 13 (§20): forward the deterministic notices verbatim —
+                # structured DB-derived data, never extracted from prose.
+                yield ChatStreamEvent(
+                    type="conflict_notice", conflicts=event.conflicts
+                )
             elif event.type == "done":
                 outcome = event.outcome
                 assert outcome is not None
@@ -664,6 +720,75 @@ class ChatService:
             content=narration,
             resolved_citations=resolved,
             comparison_id=comparison.id,  # type: ignore[attr-defined]
+        )
+
+    # ── Phase 13: conflict-turn helpers (§19) ─────────────────────────────────
+
+    async def _narrate_conflict_outcome(
+        self,
+        user: User,
+        context: "ChatMessageContext",
+        conflicts_payload: list[dict],
+    ) -> AskOutcome:
+        """Narrate already-persisted, already-authorized conflicts (§19).
+
+        The narration LLM call only phrases the provided conflict list
+        ("narrate, never originate" — the prompt forbids asserting any
+        conflict not present in the input).  Citations attach one per
+        statement referenced (bounded), pointing at the statement's chunk —
+        the exact atomic message+citations persistence path the RAG pipeline
+        uses (§50).
+        """
+        from app.infrastructure.llm import get_llm_provider
+        from app.rag.citations import QuotedSpan
+        from app.rag.conflict_narration import (
+            fallback_conflict_narration,
+            narrate_conflicts,
+        )
+
+        provider = get_llm_provider()
+        if provider is not None:
+            narration = await narrate_conflicts(conflicts_payload, provider=provider)
+        else:
+            narration = fallback_conflict_narration(conflicts_payload)
+
+        # ── Citations: one per statement (bounded), real chunk provenance ──
+        resolved: list[ResolvedCitation] = []
+        index = 0
+        for conflict in conflicts_payload:
+            for statement in conflict.get("statements", []):
+                if index >= 10:
+                    break
+                chunk_id = statement.get("chunk_id")
+                if not chunk_id:
+                    continue
+                index += 1
+                snippet = (statement.get("statement_text") or "")[:300]
+                resolved.append(
+                    ResolvedCitation(
+                        index=index,
+                        chunk_id=chunk_id,
+                        document_id=statement["document_id"],
+                        document_version_id=statement["document_version_id"],
+                        document_name=statement.get("document_name") or "Unknown document",
+                        page_id=statement["page_id"],
+                        page_number=int(statement.get("page_number") or 1),
+                        section=statement.get("section"),
+                        relevance=1.0,
+                        quoted=QuotedSpan(
+                            text=snippet,
+                            char_start=0,
+                            char_end=len(snippet),
+                        ),
+                        claim_text=f"{conflict.get('topic', 'Conflict')} — {conflict.get('severity', '')}".strip(),
+                    )
+                )
+
+        return await self._persist_comparison_turn(
+            user,
+            context,
+            content=narration,
+            resolved_citations=resolved,
         )
 
     # ── History read (conversation detail) ────────────────────────────────────

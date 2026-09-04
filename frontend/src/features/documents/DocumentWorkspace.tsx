@@ -36,6 +36,7 @@ import {
   useDocumentToc,
   useSignedUrl,
 } from '@/hooks/queries/useDocuments'
+import { useDocumentConflictSections } from '@/hooks/queries/useConflicts'
 import type { DocumentPageItem } from '@/lib/api/documents'
 
 function formatBytes(bytes: number): string {
@@ -69,6 +70,8 @@ export function DocumentWorkspace() {
   const { data: tocData, isLoading: tocLoading } = useDocumentToc(documentId, {
     pipelineActive,
   })
+  // Phase 13 — unresolved-conflict markers in the TOC (FE §6.5 `[•]`)
+  const { conflictSectionIds } = useDocumentConflictSections(documentId)
 
   if (isLoading) {
     return <div className="page-loading">Loading document…</div>
@@ -141,6 +144,7 @@ export function DocumentWorkspace() {
             hasStructure={tocData?.has_structure ?? false}
             sectionCount={tocData?.section_count ?? 0}
             isLoading={tocLoading}
+            conflictSectionIds={conflictSectionIds}
           />
           <PagesPanel
             pages={pagesData?.items ?? []}

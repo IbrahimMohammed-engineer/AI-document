@@ -21,11 +21,14 @@ export function TocPanel({
   hasStructure,
   sectionCount,
   isLoading,
+  conflictSectionIds,
 }: {
   items: TocNode[]
   hasStructure: boolean
   sectionCount: number
   isLoading: boolean
+  /** Phase 13 — section labels with an unresolved conflict (FE §6.5 `[•]`). */
+  conflictSectionIds?: Set<string>
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [selected, setSelected] = useState<string | null>(null)
@@ -42,6 +45,18 @@ export function TocPanel({
         </p>
       </div>
     )
+  }
+
+  const hasConflictMarker = conflictSectionIds && conflictSectionIds.size > 0
+
+  const nodeHasConflict = (node: TocNode): boolean => {
+    if (!hasConflictMarker) return false
+    const labels = [
+      node.section_number ? `${node.section_number} ${node.title}` : null,
+      node.title,
+      node.section_number,
+    ].filter(Boolean) as string[]
+    return labels.some((label) => conflictSectionIds.has(label))
   }
 
   const toggle = (nodeId: string) => {
@@ -100,7 +115,19 @@ export function TocPanel({
               )}
               <span className="toc-title">{node.title}</span>
             </button>
-            <span className="toc-pages">{pageSpan}</span>
+            <span className="toc-pages">
+              {pageSpan}
+              {nodeHasConflict(node) && (
+                <span
+                  className="toc-conflict-marker"
+                  role="img"
+                  aria-label="Unresolved conflict in this section"
+                  title="Unresolved conflict in this section"
+                >
+                  •
+                </span>
+              )}
+            </span>
           </div>
           {hasChildren && !isCollapsed && (
             <ul className="toc-list toc-list--nested">

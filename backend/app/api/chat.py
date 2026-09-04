@@ -122,6 +122,23 @@ def _chat_event_sse(event: ChatStreamEvent) -> str:
     if event.type == "citation":
         assert event.citation is not None
         return _sse("citation", _citation_item(event.citation).model_dump(mode="json"))
+    if event.type == "conflict_notice":
+        # Phase 13 (§20): deterministic conflict notices — the FE renders the
+        # ⚠ banner from this structured event, never from generated prose.
+        conflicts = event.conflicts or []
+        return _sse(
+            "conflict_notice",
+            {
+                "conflicts": [
+                    {
+                        "conflict_id": c.conflict_id,
+                        "topic": c.topic,
+                        "severity": c.severity,
+                    }
+                    for c in conflicts
+                ]
+            },
+        )
     if event.type == "error":
         return _sse(
             "error",

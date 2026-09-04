@@ -11,8 +11,8 @@
  *   4. When COMPLETED: summary cards, filterable change list, AI narration.
  */
 
-import { useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import './comparison.css'
 import {
@@ -200,12 +200,27 @@ function ComparisonChangeList({
   comparisonId,
   activeFilter,
   onFilterChange,
+  anchorSection,
 }: {
   comparisonId: string
   activeFilter: ChangeSeverity | null
   onFilterChange: (f: ChangeSeverity | null) => void
+  /** Phase 13 — section anchor from a conflict's "Compare Sources" (§22). */
+  anchorSection?: string | null
 }) {
   const { data, isLoading } = useComparisonChanges(comparisonId, activeFilter ?? undefined)
+  const anchored = useRef(false)
+
+  // Section anchoring: scroll to + highlight the change matching the
+  // conflicting section once the change list arrives (one-shot).
+  useEffect(() => {
+    if (anchored.current || !anchorSection || !data?.items.length) return
+    const target = document.getElementById('comparison-anchor-target')
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      anchored.current = true
+    }
+  }, [anchorSection, data?.items.length])
 
   const filters: Array<{ label: string; value: ChangeSeverity | null }> = [
     { label: 'All', value: null },
@@ -258,9 +273,23 @@ function ComparisonChangeList({
         </div>
       )}
 
-      {data?.items.map((change) => (
-        <ChangeItem key={change.id} change={change} />
-      ))}
+      {data?.items.map((change) => {
+        const isAnchor =
+          Boolean(anchorSection) && !anchored.current
+          && change.section != null
+          && (change.section === anchorSection
+            || anchorSection.includes(change.section)
+            || change.section.includes(anchorSection))
+        return (
+          <div
+            key={change.id}
+            id={isAnchor && !anchored.current ? 'comparison-anchor-target' : undefined}
+            className={isAnchor ? 'comparison-change-item comparison-change-item--anchor' : undefined}
+          >
+            <ChangeItem change={change} />
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -296,10 +325,14 @@ function ComparisonNarrationPanel({ comparisonId }: { comparisonId: string }) {
 
 // ── Version picker ────────────────────────────────────────────────────────────
 
-function VersionPicker({ onCompare }: { onCompare: (a: string, b: string) => void }) {
+function VersionPicker({ onCompare, prefillDocA, prefillDocB }: {
+  onCompare: (a: string, b: string) => void
+  prefillDocA?: string
+  prefillDocB?: string
+}) {
   // Use first 2 documents in organization as default — user selects versions
-  const [docAId, setDocAId] = useState('')
-  const [docBId, setDocBId] = useState('')
+  const [docAId, setDocAId] = useState(prefillDocA ?? '')
+  const [docBId, setDocBId] = useState(prefillDocB ?? '')
   const [versionAId, setVersionAId] = useState('')
   const [versionBId, setVersionBId] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -441,6 +474,8 @@ function VersionPicker({ onCompare }: { onCompare: (a: string, b: string) => voi
 function ComparisonDetail({ comparisonId }: { comparisonId: string }) {
   const { data: comparison } = useComparison(comparisonId)
   const [activeFilter, setActiveFilter] = useState<ChangeSeverity | null>(null)
+  const [searchParams] = useSearchParams()
+  const anchorSection = searchParams.get('section')
 
   if (!comparison) {
     return (
@@ -483,6 +518,7 @@ function ComparisonDetail({ comparisonId }: { comparisonId: string }) {
             comparisonId={comparisonId}
             activeFilter={activeFilter}
             onFilterChange={setActiveFilter}
+            anchorSection={anchorSection}
           />
         </>
       )}
@@ -495,6 +531,36 @@ function ComparisonDetail({ comparisonId }: { comparisonId: string }) {
 export function ComparisonPage() {
   const { comparisonId } = useParams<{ comparisonId?: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const mutation = useInitiateComparison()
+  const autoStarted = useRef(false)
+
+  // Phase 13 (§22): "Compare Sources" from a conflict deep-links here with
+  // the pair pre-filled (versionA/versionB) — auto-create/reuse the
+  // comparison and jump straight to the results, section-anchored.
+  const prefillVersionA = searchParams.get('versionA')
+  const prefillVersionB = searchParams.get('versionB')
+  const anchorSection = searchParams.get('section')
+
+  useEffect(() => {
+    if (comparisonId || autoStarted.current) return
+    if (!prefillVersionA || !prefillVersionB) return
+    autoStarted.current = true
+    mutation
+      .mutateAsync({
+        document_a_version_id: prefillVersionA,
+        document_b_version_id: prefillVersionB,
+      })
+      .then((result) => {
+        const suffix = anchorSection
+          ? `?section=${encodeURIComponent(anchorSection)}`
+          : ''
+        navigate(`/app/compare/${result.id}${suffix}`, { replace: true })
+      })
+      .catch(() => {
+        // Pre-fill failed (unauthorized pair etc.) — leave the picker usable
+      })
+  }, [comparisonId, prefillVersionA, prefillVersionB, anchorSection, mutation, navigate])
 
   return (
     <div className="comparison-root">
@@ -517,8 +583,12 @@ export function ComparisonPage() {
         )}
       </div>
 
-      {!comparisonId && (
-        <VersionPicker onCompare={() => {}} />
+      {!comparisonId && !autoStarted.current && (
+        <VersionPicker
+          onCompare={() => {}}
+          prefillDocA={searchParams.get('documentA') ?? ''}
+          prefillDocB={searchParams.get('documentB') ?? ''}
+        />
       )}
 
       {comparisonId && <ComparisonDetail comparisonId={comparisonId} />}

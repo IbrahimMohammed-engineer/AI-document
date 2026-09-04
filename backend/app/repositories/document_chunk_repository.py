@@ -245,6 +245,69 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         )
         return result.scalar_one()
 
+    # ── Phase 13 reads — conflict-scan candidate refs ─────────────────────────
+
+    async def list_embedded_chunk_refs_for_version(
+        self, document_version_id: str
+    ) -> list[dict[str, Any]]:
+        """Column-level projection of a version's EMBEDDED chunks (Phase 13).
+
+        Returns chunk_id / document_version_id / page_id / page_number /
+        section title+number / content — deliberately WITHOUT the embedding
+        payload (candidate generation fetches one chunk's vector lazily via
+        :meth:`get_chunk_embedding` only when that chunk becomes the query
+        side, keeping the scan's memory bounded).  Ordered by chunk_index.
+        """
+        from app.models.document import DocumentPage, DocumentSection
+
+        stmt = (
+            select(
+                DocumentChunk.id.label("chunk_id"),
+                DocumentChunk.document_version_id.label("document_version_id"),
+                DocumentChunk.page_id.label("page_id"),
+                DocumentPage.page_number.label("page_number"),
+                DocumentSection.title.label("section_title"),
+                DocumentSection.section_number.label("section_number"),
+                DocumentChunk.content.label("content"),
+            )
+            .join(DocumentPage, DocumentPage.id == DocumentChunk.page_id)
+            .outerjoin(DocumentSection, DocumentSection.id == DocumentChunk.section_id)
+            .where(
+                DocumentChunk.document_version_id == document_version_id,
+                DocumentChunk.embedding.is_not(None),  # type: ignore[attr-defined]
+            )
+            .order_by(DocumentChunk.chunk_index)
+        )
+        result = await self._session.execute(stmt)
+        return [dict(row) for row in result.mappings().all()]
+
+    async def get_chunk_embedding(self, chunk_id: str) -> list[float] | None:
+        """Fetch one chunk's stored embedding as a float vector (or None).
+
+        The pgvector column is read via CAST(... AS text) — the same
+        driver-safe pattern the search queries use — and parsed into
+        list[float] so it can be passed back as ``query_vector`` to
+        ``semantic_search`` (candidate generation reuses the chunk's own
+        vector; no re-embedding).
+        """
+        result = await self._session.execute(
+            text(
+                "SELECT CAST(embedding AS text) FROM document_chunks "
+                "WHERE id = :chunk_id AND embedding IS NOT NULL"
+            ),
+            {"chunk_id": chunk_id},
+        )
+        row = result.first()
+        if row is None or row[0] is None:
+            return None
+        raw = str(row[0]).strip().strip("[]")
+        if not raw:
+            return None
+        try:
+            return [float(x) for x in raw.split(",")]
+        except ValueError:
+            return None
+
     # ── Phase 7 writes — embedding updates ────────────────────────────────────
 
     async def update_embeddings_batch(
@@ -378,6 +441,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         top_k: int = 50,
         hnsw_ef_search: int = 100,
         filters: SearchFilters | None = None,
+        exclude_document_id: str | None = None,
     ) -> list[ChunkSearchResult]:
         """ANN cosine similarity search with mandatory permission predicates.
 
@@ -402,6 +466,10 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             hnsw_ef_search:  Session-level ef_search for recall/latency tuning.
             filters:         Optional metadata filters (document_type /
                              collection / department / owner).
+            exclude_document_id: Optional document ID whose chunks are excluded
+                             entirely (Phase 13 candidate generation — "similar
+                             chunks in a DIFFERENT document").  One additional
+                             bound predicate in the same statement.
 
         Returns:
             Ranked list of ChunkSearchResult, highest similarity first.
@@ -429,6 +497,9 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         vector_str = "[" + ",".join(str(x) for x in query_vector) + "]"
 
         filter_clauses, filter_params = self._metadata_filter_parts(filters)
+        if exclude_document_id is not None:
+            filter_clauses = [*filter_clauses, "d.id <> :exclude_document_id"]
+            filter_params["exclude_document_id"] = exclude_document_id
         filter_sql = (" AND " + " AND ".join(filter_clauses)) if filter_clauses else ""
 
         sql = text(

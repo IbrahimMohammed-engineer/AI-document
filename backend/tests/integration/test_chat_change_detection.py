@@ -191,14 +191,20 @@ class TestChatChangeDetection:
         )
         # Doc B: distinct content so the cross-document comparison (doc A's
         # current version vs doc B's current version) detects real changes.
+        # Its section NUMBERS overlap doc A's so section alignment matches in
+        # BOTH orientations (the pair order is normalized by document-id, a
+        # UUID coin flip; the degrade fallback would otherwise strip the
+        # chunk ids the citation assertions need).
         doc_b, _ = await seed_document_with_versions(
             factory,
             organization_id=org_id, owner_id=user_id, name="Policy B",
             versions=[(1, _date(2025, 6, 1), [
-                SectionSpec("1", "Policy B Overview",
+                SectionSpec("1", "Purpose",
                             "This is the entirely different policy B text."),
-                SectionSpec("2", "Policy B Scope",
+                SectionSpec("3.1", "Policy B Scope",
                             "Policy B applies to subsidiaries only."),
+                SectionSpec("4.2", "Policy B Governance",
+                            "Policy B is reviewed by the subsidiary board."),
             ])],
         )
 

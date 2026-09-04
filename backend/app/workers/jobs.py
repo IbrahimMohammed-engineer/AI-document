@@ -51,7 +51,12 @@ from app.infrastructure.embeddings import (
     get_embedding_provider,
 )
 from app.infrastructure.ocr import OCRProviderUnavailable, get_ocr_provider
-from app.infrastructure.queue import enqueue_processing_job, push_dead_letter
+from app.infrastructure.queue import (
+    QUEUE_DEFAULT,
+    QUEUE_LOW,
+    enqueue_processing_job,
+    push_dead_letter,
+)
 from app.infrastructure.storage import (
     StorageObjectMissingError,
     get_storage_provider,
@@ -407,9 +412,10 @@ async def handle_indexing(
 
 
 # Handler registry — later phases add real stage handlers here.
-# NOTE: handle_comparison is NOT in this dict — comparison jobs are dispatched
-# directly in run_processing_job before the HANDLERS.get() lookup because
-# the comparison handler signature differs (takes comparison, not version/document).
+# NOTE: handle_comparison / the CONFLICT_SCAN handler are NOT in this dict —
+# those job types are dispatched directly in run_processing_job before the
+# HANDLERS.get() lookup because their signatures differ (comparison takes a
+# DocumentComparison; the org-wide scan takes no version/document at all).
 HANDLERS: dict[JobType, JobHandler] = {
     JobType.EXTRACTION: handle_extraction,
     JobType.CHUNKING: handle_chunking,
@@ -829,6 +835,21 @@ async def handle_comparison(
         await comp_repo.update_status(
             comparison, "COMPLETED", summary=summary
         )
+
+    # ── Phase 13: comparison-derived conflict seeding (§13) ─────────────────
+    # The single, minimal touch-point into Phase-12-owned code: immediately
+    # after status = COMPLETED, qualifying changes (MODIFIED + MAJOR + both
+    # sides CURRENT) seed conflicts through the same dedup/persistence path
+    # the background scan uses.  Deterministic — no LLM call in this path.
+    try:
+        from app.services.conflict_service import ConflictService
+
+        await ConflictService.seed_from_comparison(comparison_id, session)
+    except Exception:  # noqa: BLE001 — seeding must never fail the comparison
+        logger.exception(
+            "Conflict seeding failed for comparison %s (non-fatal)", comparison_id
+        )
+
     logger.info(
         "handle_comparison: comparison=%s total_changes=%d major=%d moderate=%d minor=%d",
         comparison_id, total, counts.get("MAJOR", 0),
@@ -894,6 +915,150 @@ async def _compare_whole_document(
     )
 
 
+# ── CONFLICT_SCAN handler (Phase 13 — org-wide background scan) ────────────────
+
+async def _run_conflict_scan_job(
+    ctx: dict[str, Any],
+    job: ProcessingJob,
+    session: AsyncSession,
+) -> str:
+    """Entry point for CONFLICT_SCAN jobs — called directly from run_processing_job.
+
+    Mirrors the _run_comparison_job early-branch pattern: transitions to
+    PROCESSING already happened at claim; this runs the checkpointed scan,
+    then COMPLETED on success or the existing retry policy on transient
+    error.  A CONFLICT_SCAN failure NEVER touches any DocumentVersion status
+    (the job is org-wide — there is no version to fail).
+    """
+    from app.services.conflict_service import ConflictService
+
+    job_repo = ProcessingJobRepository(session)
+
+    # Capture plain retry-budget values BEFORE the pipeline runs (same
+    # expired-ORM-instance discipline as the comparison path).
+    job_id_str = job.id
+    attempts = job.attempts
+    max_attempts = job.max_attempts
+
+    try:
+        await ConflictService.run_scan(
+            organization_id=job.organization_id, job=job, db=session
+        )
+    except DeterministicJobError as exc:
+        # The scan loop raises OUTSIDE any _atomic block — normalize the
+        # aborted transaction before the failure-path writes.
+        await session.rollback()
+        async with _atomic(session):
+            await job_repo.mark_failed(job, error_message=exc.message, now=utc_now())
+        await _dead_letter(job, exc.message)
+        return JobStatus.FAILED.value
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        await session.rollback()
+        logger.warning(
+            "Conflict scan job %s failed (attempt %s/%s): %s",
+            job_id_str, attempts, max_attempts, message,
+        )
+        if attempts < max_attempts:
+            delay = get_backoff_seconds(attempts)
+            fresh_job = await job_repo.get_by_id(job_id_str)
+            if fresh_job is None:
+                logger.error(
+                    "Conflict scan job %s vanished mid-retry — aborting", job_id_str
+                )
+                return JobStatus.FAILED.value
+            async with _atomic(session):
+                await ProcessingJobRepository(session).mark_retrying(
+                    fresh_job, error_message=message, now=utc_now()
+                )
+            try:
+                await enqueue_processing_job(
+                    job_id_str, queue_name=QUEUE_LOW, delay_seconds=delay
+                )
+            except Exception:
+                logger.exception(
+                    "Re-enqueue failed for RETRYING conflict scan %s — sweep will recover",
+                    job_id_str,
+                )
+            return JobStatus.RETRYING.value
+        # Retries exhausted
+        fresh_job = await job_repo.get_by_id(job_id_str)
+        if fresh_job is None:
+            logger.error(
+                "Conflict scan job %s vanished at retry exhaustion — aborting", job_id_str
+            )
+            return JobStatus.FAILED.value
+        async with _atomic(session):
+            await ProcessingJobRepository(session).mark_failed(
+                fresh_job,
+                error_message=f"Retries exhausted. Last error: {message}",
+                now=utc_now(),
+            )
+        await _dead_letter(fresh_job, message)
+        return JobStatus.FAILED.value
+
+    # Success — the scan's checkpoint retains its final counters.
+    async with _atomic(session):
+        await job_repo.mark_completed(job, now=utc_now())
+    logger.info("Conflict scan job %s COMPLETED", job.id)
+    return JobStatus.COMPLETED.value
+
+
+# ── Conflict-scan cron trigger (Phase 13 — §15) ───────────────────────────────
+
+async def trigger_conflict_scans(ctx: dict[str, Any]) -> int:
+    """Nightly cron entry: create+enqueue one CONFLICT_SCAN job per active org.
+
+    For each active organization with no currently in-flight (PENDING /
+    PROCESSING / RETRYING) CONFLICT_SCAN job, exactly one org-wide scan job
+    is created (document_version_id NULL) and enqueued on the LOW queue —
+    maintenance/housekeeping never starves ingestion bursts.  Returns the
+    number of scans actually triggered.
+    """
+    from sqlalchemy import select
+
+    from app.infrastructure.database import get_session_factory
+    from app.models.organization import Organization
+    from app.services.job_service import JobService
+
+    session_factory = get_session_factory()
+    triggered = 0
+    async with session_factory() as session:
+        orgs_result = await session.execute(
+            select(Organization).order_by(Organization.id)
+        )
+        organizations = list(orgs_result.scalars().all())
+
+        from app.repositories.conflict_repository import ConflictRepository
+
+        conflict_repo = ConflictRepository(session)
+        for organization in organizations:
+            # Skip disabled orgs if a status column ever says so (defensive)
+            if getattr(organization, "deleted_at", None) is not None:
+                continue
+            if await conflict_repo.has_in_flight_scan(organization.id):
+                logger.debug(
+                    "Conflict scan already in flight for org %s — skipping",
+                    organization.id,
+                )
+                continue
+            job = await JobService.create_for_org_scan(
+                session, organization_id=organization.id
+            )
+            await session.commit()
+            # Pointer AFTER commit (durable-row-then-pointer — Backend §50);
+            # failures are logged, never raised — the sweep recovers.
+            await JobService.enqueue_after_commit(job, queue_name=QUEUE_LOW)
+            triggered += 1
+            logger.info(
+                "Conflict scan triggered for org %s (job %s)",
+                organization.id, job.id,
+            )
+
+    logger.info("trigger_conflict_scans: %d scan job(s) triggered", triggered)
+    return triggered
+
+
 # ── The single Arq job function ───────────────────────────────────────────────
 
 async def run_processing_job(ctx: dict[str, Any], job_id: str) -> str:
@@ -945,6 +1110,10 @@ async def run_processing_job(ctx: dict[str, Any], job_id: str) -> str:
         # ── Dispatch: COMPARISON jobs take a separate path ────────────────────
         if JobType(job.job_type) is JobType.COMPARISON:
             return await _run_comparison_job(ctx, job, session)
+
+        # ── Dispatch: CONFLICT_SCAN jobs are org-wide (no version anchor) ─────
+        if JobType(job.job_type) is JobType.CONFLICT_SCAN:
+            return await _run_conflict_scan_job(ctx, job, session)
 
         # ── Load referenced entity FRESH + validate tenancy ───────────────
         ver_repo = DocumentVersionRepository(session)

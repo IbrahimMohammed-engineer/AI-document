@@ -228,6 +228,10 @@ def create_app() -> FastAPI:
     from app.api.compare import router as compare_router
     app.include_router(compare_router)
 
+    # Phase 13 — Conflict Detection (scanning, verification, resolution)
+    from app.api.conflicts import router as conflicts_router
+    app.include_router(conflicts_router)
+
     return app
 
 

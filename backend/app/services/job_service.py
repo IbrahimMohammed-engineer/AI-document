@@ -104,6 +104,27 @@ class JobService:
         )
 
     @staticmethod
+    async def create_for_org_scan(
+        db: AsyncSession,
+        *,
+        organization_id: str,
+        job_type: JobType = JobType.CONFLICT_SCAN,
+    ) -> ProcessingJob:
+        """Insert a PENDING org-wide scan job row inside the CALLER's tx (§15).
+
+        Mirrors ``create_for_version``'s shape, adapted for the now-nullable
+        ``document_version_id``: an org-wide CONFLICT_SCAN job has no single
+        version anchor, so the column stays NULL (allowed only for this job
+        type by ck_processing_jobs_version_required).  Queue: QUEUE_LOW —
+        maintenance/housekeeping never starves ingestion bursts.
+        """
+        repo = ProcessingJobRepository(db)
+        return await repo.create_for_org_scan(
+            organization_id=organization_id,
+            max_attempts=get_max_attempts(job_type),
+        )
+
+    @staticmethod
     async def enqueue_after_commit(
         job: ProcessingJob,
         *,

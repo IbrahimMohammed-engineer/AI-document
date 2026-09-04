@@ -84,6 +84,28 @@ def _sources_event(e: AskStreamEvent) -> str:
     )
 
 
+def _conflict_notice_event(e: AskStreamEvent) -> str:
+    """Phase 13: deterministic conflict notices (§20).
+
+    The FE renders the ⚠ banner from this structured event — never by
+    parsing generated text, so the notice cannot be hallucinated.
+    """
+    conflicts = e.conflicts or []
+    return _sse(
+        "conflict_notice",
+        {
+            "conflicts": [
+                {
+                    "conflict_id": c.conflict_id,
+                    "topic": c.topic,
+                    "severity": c.severity,
+                }
+                for c in conflicts
+            ]
+        },
+    )
+
+
 def _done_event(e: AskStreamEvent) -> str:
     outcome = e.outcome
     assert outcome is not None
@@ -186,6 +208,8 @@ async def ask(
                     yield _token_event(event)
                 elif event.type == "sources":
                     yield _sources_event(event)
+                elif event.type == "conflict_notice":
+                    yield _conflict_notice_event(event)
                 elif event.type == "done":
                     yield _done_event(event)
                 elif event.type == "error":

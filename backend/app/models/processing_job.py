@@ -26,7 +26,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, generate_uuid
@@ -74,6 +74,12 @@ class ProcessingJob(Base, TimestampMixin):
             "(job_type = 'COMPARISON') = (comparison_id IS NOT NULL)",
             name="ck_processing_jobs_comparison_pairing",
         ),
+        # Phase 13: every job type except CONFLICT_SCAN must anchor to a
+        # version (CONFLICT_SCAN is org-wide — anchored to the organization).
+        CheckConstraint(
+            "job_type = 'CONFLICT_SCAN' OR document_version_id IS NOT NULL",
+            name="ck_processing_jobs_version_required",
+        ),
         Index("ix_processing_jobs_document_version_id", "document_version_id", "status"),
         Index("ix_processing_jobs_status", "status", "created_at"),
         Index("ix_processing_jobs_org_status", "organization_id", "status"),
@@ -92,11 +98,16 @@ class ProcessingJob(Base, TimestampMixin):
         nullable=False,
         comment="Tenant owner — carried explicitly in payloads, re-validated by workers",
     )
-    document_version_id: Mapped[str] = mapped_column(
+    document_version_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False),
         ForeignKey("document_versions.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+        comment="NULL only for org-wide CONFLICT_SCAN jobs (ck_processing_jobs_version_required)",
     )
+    # Phase 13 — scan-resume state for org-wide CONFLICT_SCAN jobs:
+    # {"cursor_document_id": ..., "documents_total": ..., "documents_scanned": ...,
+    #  "candidates_evaluated": ..., "conflicts_created": ...} (§15).
+    checkpoint: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     # Phase 12 — set only for job_type=COMPARISON; document_version_id holds
     # the anchor (A) version for indexing/bookkeeping (§10, Gap 3).
     comparison_id: Mapped[Optional[str]] = mapped_column(
@@ -138,7 +149,7 @@ class ProcessingJob(Base, TimestampMixin):
         foreign_keys=[organization_id],
         lazy="noload",
     )
-    document_version: Mapped[DocumentVersion] = relationship(
+    document_version: Mapped[Optional[DocumentVersion]] = relationship(
         "DocumentVersion",
         foreign_keys=[document_version_id],
         lazy="noload",

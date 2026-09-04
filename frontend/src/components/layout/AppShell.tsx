@@ -24,6 +24,7 @@ const mainNavItems: NavItem[] = [
   { to: '/app/ask', label: 'Ask AI', icon: '✦' },
   { to: '/app/search', label: 'Search', icon: '⌕' },
   { to: '/app/compare', label: 'Compare', icon: '⊟' },
+  { to: '/app/conflicts', label: 'Conflicts', icon: '⚠' },
 ]
 
 const analyticsNavItems: NavItem[] = [

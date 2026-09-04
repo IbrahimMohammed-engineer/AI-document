@@ -53,6 +53,8 @@ from app.models.comparison import (  # noqa: F401
     ComparisonChange,
     DocumentComparison,
 )
+# Phase 13 — conflict detection models
+from app.models.conflict import Conflict, ConflictStatement  # noqa: F401
 
 # ─── Alembic Config ───────────────────────────────────────────────────────────
 

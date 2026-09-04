@@ -14,10 +14,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   streamChatMessage,
   type ChatScopePayload,
   type ChatStreamEvent,
+  type ConflictNotice,
 } from '@/lib/api/chat'
 import type { AskCitation, AskSource } from '@/lib/api/ask'
 import {
@@ -44,6 +46,8 @@ interface AskTurn {
   /** assistant turns */
   sources?: AskSource[]
   citations?: AskCitation[]
+  /** Phase 13 — deterministic notices: the retrieved sources disagree (§20). */
+  conflictNotices?: ConflictNotice[]
   groundedness?: 'grounded' | 'partial' | 'ungrounded'
   note?: string | null
   feedback?: -1 | 1 | null
@@ -186,6 +190,23 @@ export function AskPage() {
                   ? {
                       ...t,
                       citations: [...(t.citations ?? []), event.citation],
+                    }
+                  : t,
+              ),
+            )
+            break
+          case 'conflict_notice':
+            // Phase 13 (§20): the retrieved sources disagree.  The notice
+            // data is 100% server-computed (never parsed from the answer).
+            setTurns((prev) =>
+              prev.map((t) =>
+                t.id === assistantId
+                  ? {
+                      ...t,
+                      conflictNotices: [
+                        ...(t.conflictNotices ?? []),
+                        ...event.conflicts,
+                      ],
                     }
                   : t,
               ),
@@ -444,6 +465,35 @@ export function AskPage() {
                       {phase === 'searching'
                         ? 'Searching documents…'
                         : 'Reading sources…'}
+                    </div>
+                  )}
+
+                  {/* Phase 13 (§20): deterministic conflict notices — the
+                      retrieved sources disagree on a persisted conflict. */}
+                  {turn.conflictNotices && turn.conflictNotices.length > 0 && (
+                    <div className="ask-conflict-notice" role="alert">
+                      <span className="ask-conflict-notice__icon">⚠</span>
+                      <div className="ask-conflict-notice__body">
+                        <div>
+                          Conflicting information detected
+                          {turn.conflictNotices.length === 1
+                            ? ` on “${turn.conflictNotices[0].topic}”`
+                            : ` on ${turn.conflictNotices.length} topics`}
+                          . The sources below disagree — review the recorded
+                          conflict before acting on this answer.
+                        </div>
+                        <div className="ask-conflict-notice__links">
+                          {turn.conflictNotices.slice(0, 3).map((notice) => (
+                            <Link
+                              key={notice.conflict_id}
+                              className="btn btn-secondary btn-sm"
+                              to={`/app/conflicts/${notice.conflict_id}`}
+                            >
+                              Review “{notice.topic}”
+                            </Link>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   )}
 

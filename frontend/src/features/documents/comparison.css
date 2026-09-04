@@ -503,3 +503,11 @@
 }
 
 .comparison-degraded-warning__icon { flex-shrink: 0; margin-top: 1px; }
+
+/* ── Phase 13: section anchor from a conflict's Compare Sources (§22) ─────── */
+.comparison-change-item--anchor {
+  outline: 2px solid hsl(0 72% 60%);
+  outline-offset: -2px;
+  border-radius: var(--radius-md);
+  background: hsl(0 72% 98%);
+}

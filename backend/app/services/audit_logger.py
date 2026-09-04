@@ -49,6 +49,12 @@ class AuditAction:
     # payloads (the question text) are NEVER in the metadata (Backend §54).
     QUESTION_ASKED = "QUESTION_ASKED"
 
+    # ── Conflict events (Phase 13) ────────────────────────────────────────────
+    # Written exactly once, inside ConflictService.resolve().  Metadata
+    # carries only {"decision", "note"} — never provider payloads or full
+    # statement text (same small/non-sensitive metadata convention).
+    CONFLICT_RESOLVED = "CONFLICT_RESOLVED"
+
 
 class AuditLogger:
     @staticmethod

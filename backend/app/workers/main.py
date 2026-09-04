@@ -21,7 +21,11 @@ from arq.connections import RedisSettings
 
 from app.core.config import get_settings
 from app.core.logging import setup_logging
-from app.workers.jobs import reconciliation_sweep, run_processing_job
+from app.workers.jobs import (
+    reconciliation_sweep,
+    run_processing_job,
+    trigger_conflict_scans,
+)
 
 settings = get_settings()
 setup_logging(log_level=settings.log_level)
@@ -77,7 +81,7 @@ async def on_shutdown(ctx: dict) -> None:
 class WorkerSettings:
     """Arq worker configuration (consumed by `arq` / run_worker)."""
 
-    functions = [run_processing_job, reconciliation_sweep]
+    functions = [run_processing_job, reconciliation_sweep, trigger_conflict_scans]
 
     # Periodic reconciliation sweep — cron fields are wall-clock sets, so the
     # configured interval maps onto the seconds within each minute (an interval
@@ -92,6 +96,18 @@ class WorkerSettings:
             second=_sweep_second,
             unique=True,
             run_at_startup=True,
+            max_tries=1,
+        ),
+        # Phase 13: nightly org-wide conflict scan (V1 — one fixed cadence;
+        # post-batch-READY triggering and per-org windows are deferred
+        # enhancements, plan §15).
+        cron(
+            trigger_conflict_scans,
+            hour=settings.conflict_scan_hour,
+            minute=0,
+            second=0,
+            unique=True,
+            run_at_startup=False,
             max_tries=1,
         ),
     ]

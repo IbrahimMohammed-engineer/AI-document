@@ -52,8 +52,9 @@ class TestParseAnalyzerOutput:
     def test_intent_case_insensitive(self):
         analysis = parse_analyzer_output('{"intent": "comparison"}')
         assert analysis.intent == "COMPARISON"
-        # Phase 12: COMPARISON is now a LIVE intent (routed to the comparison
-        # service) — only SUMMARY/CONFLICT_DETECTION/EXTRACTION stay deferred.
+        # Phases 12-13: COMPARISON/CHANGE_DETECTION (Phase 12) and
+        # CONFLICT_DETECTION (Phase 13) are now LIVE intents — only
+        # SUMMARY/EXTRACTION stay deferred.
         assert not analysis.is_deferred_intent
 
     def test_deferred_intents_classified(self):
@@ -62,8 +63,9 @@ class TestParseAnalyzerOutput:
 
     def test_only_phase14_intents_remain_deferred(self):
         assert parse_analyzer_output('{"intent": "summary"}').is_deferred_intent
-        assert parse_analyzer_output('{"intent": "conflict_detection"}').is_deferred_intent
         assert parse_analyzer_output('{"intent": "extraction"}').is_deferred_intent
+        # Phase 13: CONFLICT_DETECTION now routes to ConflictService
+        assert not parse_analyzer_output('{"intent": "conflict_detection"}').is_deferred_intent
         assert not parse_analyzer_output('{"intent": "change_detection"}').is_deferred_intent
 
     def test_invalid_json_raises(self):

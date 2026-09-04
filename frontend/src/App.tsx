@@ -9,7 +9,7 @@
  * and the session-expired redirect wired to the API client's 401 handler.
  */
 import { useEffect } from 'react'
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { AppShell } from '@/components/layout/AppShell'
 import { setSessionExpiredHandler } from '@/lib/api/client'
 import { useAuthStore } from '@/store/authStore'
@@ -22,6 +22,14 @@ import {
 import { DocumentWorkspace } from '@/features/documents'
 import { ComparisonPage } from '@/features/documents'
 import { AskPage } from '@/features/ask'
+import { ConflictDetailPage, ConflictsPage } from '@/features/conflicts'
+import { useConflictScanStatus, useConflicts } from '@/hooks/queries/useConflicts'
+
+/** Lightweight open-conflict count for the Dashboard KPI card. */
+function useOpenConflictCount() {
+  const query = useConflicts('OPEN')
+  return { data: query.isLoading ? undefined : (query.data?.items.length ?? 0) }
+}
 
 // ── Placeholder page components ───────────────────────────────────────────────
 // These will be replaced with full implementations in later phases.
@@ -49,6 +57,12 @@ function PlaceholderPage({ title, description }: { title: string; description: s
 }
 
 function DashboardPage() {
+  // Phase 13 — the "Open Conflicts" KPI is now live (the other cards stay
+  // placeholders for their owning phases).
+  const scanStatusQuery = useConflictScanStatus()
+  const openConflictsQuery = useOpenConflictCount()
+  const openConflicts = openConflictsQuery.data ?? '—'
+
   return (
     <div>
       <div className="page-header">
@@ -62,7 +76,6 @@ function DashboardPage() {
           { label: 'Total Documents', value: '—', icon: '📄', phase: 3 },
           { label: 'Active Conversations', value: '—', icon: '✦', phase: 9 },
           { label: 'Documents Processing', value: '—', icon: '⚙', phase: 5 },
-          { label: 'Open Conflicts', value: '—', icon: '⚠', phase: 10 },
         ].map((stat) => (
           <div key={stat.label} className="card" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -75,6 +88,25 @@ function DashboardPage() {
             <div className="text-sm text-muted">{stat.label}</div>
           </div>
         ))}
+        <Link
+          to="/app/conflicts"
+          className="card"
+          style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', textDecoration: 'none' }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '1.5rem' }}>⚠</span>
+            <span className="badge badge-gray">Phase 13</span>
+          </div>
+          <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--color-neutral-800)' }}>
+            {openConflicts}
+          </div>
+          <div className="text-sm text-muted">
+            Open Conflicts
+            {scanStatusQuery.data?.unscanned_document_count
+              ? ` · ${scanStatusQuery.data.unscanned_document_count} unscanned`
+              : ''}
+          </div>
+        </Link>
       </div>
 
       <div className="card">
@@ -199,6 +231,9 @@ export function App() {
         {/* Phase 12 — Document comparison (version picker + live results) */}
         <Route path="compare" element={<ComparisonPage />} />
         <Route path="compare/:comparisonId" element={<ComparisonPage />} />
+        {/* Phase 13 — Conflict detection (list + review/resolution workflow) */}
+        <Route path="conflicts" element={<ConflictsPage />} />
+        <Route path="conflicts/:id" element={<ConflictDetailPage />} />
         <Route path="analytics" element={<PlaceholderPage title="Analytics" description="Usage metrics, processing stats, AI quality — Phase 10" />} />
         <Route path="settings" element={<PlaceholderPage title="Settings" description="Organization, users, roles, integrations — Phase 3+" />} />
         <Route path="settings/*" element={<PlaceholderPage title="Settings" description="Organization settings — Phase 3+" />} />

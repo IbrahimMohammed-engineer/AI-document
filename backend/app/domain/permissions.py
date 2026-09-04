@@ -19,6 +19,7 @@ class PermissionKey(StrEnum):
     DOCUMENT_DELETE = "document:delete"
     CHAT_CREATE = "chat:create"
     COMPARISON_CREATE = "comparison:create"
+    CONFLICT_RESOLVE = "conflict:resolve"
     USER_MANAGE = "user:manage"
     SETTINGS_MANAGE = "settings:manage"
     ANALYTICS_READ = "analytics:read"
