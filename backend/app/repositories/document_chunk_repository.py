@@ -125,6 +125,45 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_for_section(
+        self,
+        section_id: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[DocumentChunk]:
+        """Return chunks belonging to a specific document section (Phase 12).
+
+        Used by the comparison worker to load section text for diffing.
+        Results are returned in reading order (chunk_index ascending).
+        """
+        stmt = (
+            select(DocumentChunk)
+            .where(DocumentChunk.section_id == section_id)
+            .order_by(DocumentChunk.chunk_index)
+            .offset(offset)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_for_version_text(
+        self,
+        document_version_id: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[DocumentChunk]:
+        """Return all chunks for a version in reading order (Phase 12 whole-doc fallback).
+
+        Used by ``_compare_whole_document`` when section alignment is degraded
+        and the comparison falls back to a whole-document text diff.
+        """
+        return await self.list_for_version(
+            document_version_id, offset=offset, limit=limit
+        )
+
     # ── Phase 6 writes ────────────────────────────────────────────────────────
 
     async def delete_for_version(self, document_version_id: str) -> int:

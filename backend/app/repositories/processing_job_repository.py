@@ -57,6 +57,31 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
         )
         return await self.add(job)
 
+    async def create_for_comparison(
+        self,
+        *,
+        organization_id: str,
+        document_version_id: str,
+        comparison_id: str,
+        max_attempts: int = 3,
+    ) -> ProcessingJob:
+        """Insert a PENDING COMPARISON job row and flush (does NOT commit).
+
+        Sets both ``document_version_id`` (anchor/A version) and
+        ``comparison_id`` so the Phase 12 CHECK constraint is satisfied:
+        ``(job_type = 'COMPARISON') = (comparison_id IS NOT NULL)`` (§10, Gap 3).
+        """
+        job = ProcessingJob(
+            organization_id=organization_id,
+            document_version_id=document_version_id,
+            comparison_id=comparison_id,
+            job_type="COMPARISON",
+            status=JobStatus.PENDING.value,
+            attempts=0,
+            max_attempts=max_attempts,
+        )
+        return await self.add(job)
+
     # ── Reads ─────────────────────────────────────────────────────────────────
 
     async def get_for_version(

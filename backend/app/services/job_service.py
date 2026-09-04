@@ -78,6 +78,32 @@ class JobService:
         )
 
     @staticmethod
+    async def create_for_comparison(
+        db: AsyncSession,
+        *,
+        organization_id: str,
+        comparison_id: str,
+        anchor_version_id: str,
+    ) -> ProcessingJob:
+        """Insert a PENDING COMPARISON job row inside the CALLER's transaction.
+
+        Mirrors ``create_for_version`` but populates ``comparison_id`` for the
+        Phase 12 COMPARISON job type (§10 Task 7, Gap 3).  ``anchor_version_id``
+        satisfies the NOT NULL ``document_version_id`` column while carrying
+        the comparison FK in ``comparison_id``.
+
+        Must be called INSIDE the transaction that creates the
+        ``document_comparisons`` row so both are committed atomically (Backend §50).
+        """
+        repo = ProcessingJobRepository(db)
+        return await repo.create_for_comparison(
+            organization_id=organization_id,
+            document_version_id=anchor_version_id,
+            comparison_id=comparison_id,
+            max_attempts=get_max_attempts(JobType.COMPARISON),
+        )
+
+    @staticmethod
     async def enqueue_after_commit(
         job: ProcessingJob,
         *,

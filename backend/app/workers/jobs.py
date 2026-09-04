@@ -407,12 +407,491 @@ async def handle_indexing(
 
 
 # Handler registry — later phases add real stage handlers here.
+# NOTE: handle_comparison is NOT in this dict — comparison jobs are dispatched
+# directly in run_processing_job before the HANDLERS.get() lookup because
+# the comparison handler signature differs (takes comparison, not version/document).
 HANDLERS: dict[JobType, JobHandler] = {
     JobType.EXTRACTION: handle_extraction,
     JobType.CHUNKING: handle_chunking,
     JobType.EMBEDDING: handle_embedding,
     JobType.INDEXING: handle_indexing,
 }
+
+
+# ── COMPARISON stage handler (Phase 12 — comparison pipeline) ─────────────────
+
+async def _run_comparison_job(
+    ctx: dict[str, Any],
+    job: ProcessingJob,
+    session: AsyncSession,
+) -> str:
+    """Entry point for COMPARISON jobs — called directly from run_processing_job.
+
+    Loads the DocumentComparison by job.comparison_id, validates tenancy,
+    transitions status to PROCESSING, runs the full comparison pipeline, and
+    marks COMPLETED or FAILED.
+    """
+    from app.models.comparison import DocumentComparison
+    from app.repositories.document_comparison_repository import DocumentComparisonRepository
+    from sqlalchemy import select
+
+    job_repo = ProcessingJobRepository(session)
+    comp_repo = DocumentComparisonRepository(session)
+
+    # Load the comparison record
+    comp_result = await session.execute(
+        select(DocumentComparison).where(DocumentComparison.id == job.comparison_id)
+    )
+    comparison = comp_result.scalar_one_or_none()
+    comparison_id_str = comparison.id if comparison is not None else None
+    if comparison is None:
+        async with _atomic(session):
+            await job_repo.mark_failed(
+                job,
+                error_message=f"DocumentComparison {job.comparison_id} not found.",
+                now=utc_now(),
+            )
+        return JobStatus.FAILED.value
+
+    # Tenancy check
+    if comparison.organization_id != job.organization_id:
+        logger.error(
+            "TENANCY MISMATCH on comparison job %s: payload org=%s, comparison org=%s",
+            job.id, job.organization_id, comparison.organization_id,
+        )
+        async with _atomic(session):
+            await job_repo.mark_failed(
+                job,
+                error_message="Comparison job payload failed tenant validation.",
+                now=utc_now(),
+            )
+        return JobStatus.FAILED.value
+
+    # Transition comparison to PROCESSING
+    async with _atomic(session):
+        await comp_repo.update_status(comparison, "PROCESSING")
+
+    # Capture plain retry-budget values BEFORE the pipeline runs: any
+    # mid-pipeline rollback expires the ORM instances, and reading ANY
+    # attribute (even the PK) on an expired instance outside the async
+    # greenlet raises MissingGreenlet.
+    job_id_str = job.id
+    attempts = job.attempts
+    max_attempts = job.max_attempts
+
+    try:
+        await handle_comparison(ctx, job, comparison, session)
+    except DeterministicJobError as exc:
+        async with _atomic(session):
+            await job_repo.mark_failed(job, error_message=exc.message, now=utc_now())
+            await comp_repo.update_status(
+                comparison, "FAILED", error_message=exc.message
+            )
+        await _dead_letter(job, exc.message)
+        return JobStatus.FAILED.value
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        logger.warning("Comparison job %s failed (attempt %s/%s): %s",
+                       job_id_str, attempts, max_attempts, message)
+        if attempts < max_attempts:
+            delay = get_backoff_seconds(attempts)
+            # The failed pipeline's rollback expired the ORM instances —
+            # reload BOTH fresh before the RETRYING transition writes.
+            fresh_job = await job_repo.get_by_id(job_id_str)
+            fresh_comparison = await comp_repo.get_by_id(comparison_id_str)
+            if fresh_job is None or fresh_comparison is None:
+                logger.error(
+                    "Comparison job %s vanished mid-retry — aborting", job_id_str
+                )
+                return JobStatus.FAILED.value
+            async with _atomic(session):
+                await ProcessingJobRepository(session).mark_retrying(
+                    fresh_job, error_message=message, now=utc_now()
+                )
+                await comp_repo.update_status(fresh_comparison, "PENDING")
+            try:
+                await enqueue_processing_job(job_id_str, delay_seconds=delay)
+            except Exception:
+                logger.exception(
+                    "Re-enqueue failed for RETRYING comparison job %s — sweep will recover", job_id_str
+                )
+            return JobStatus.RETRYING.value
+        # Retries exhausted
+        fresh_job = await job_repo.get_by_id(job_id_str)
+        fresh_comparison = await comp_repo.get_by_id(comparison_id_str)
+        if fresh_job is None or fresh_comparison is None:
+            logger.error(
+                "Comparison job %s vanished at retry exhaustion — aborting", job_id_str
+            )
+            return JobStatus.FAILED.value
+        async with _atomic(session):
+            await ProcessingJobRepository(session).mark_failed(
+                fresh_job,
+                error_message=f"Retries exhausted. Last error: {message}",
+                now=utc_now(),
+            )
+            await comp_repo.update_status(
+                fresh_comparison, "FAILED",
+                error_message=f"Retries exhausted. Last error: {message}"
+            )
+        await _dead_letter(fresh_job, message)
+        return JobStatus.FAILED.value
+
+    # Success
+    async with _atomic(session):
+        await job_repo.mark_completed(job, now=utc_now())
+    logger.info(
+        "Comparison job %s COMPLETED: comparison=%s",
+        job.id, comparison.id,
+    )
+    return JobStatus.COMPLETED.value
+
+
+async def handle_comparison(
+    ctx: dict[str, Any],
+    job: ProcessingJob,
+    comparison: object,
+    session: AsyncSession,
+) -> None:
+    """Full comparison pipeline: alignment → text diff → semantic → classify → persist.
+
+    Implements §9.4–§9.9 of the Phase 12 plan:
+      1. Load both versions' sections and chunks.
+      2. Section alignment (number match → title match → embedding similarity).
+      3. Per-aligned-pair: text diff (deterministic, §9.5).
+      4. Per-MODIFIED pair: semantic materiality call (LLM, bounded, §9.6).
+      5. Severity classification (pure, §9.8).
+      6. Persist comparison_changes INCREMENTALLY (one INSERT + commit per section).
+      7. On ADDED/REMOVED sections: persist immediately as MODERATE/MAJOR.
+      8. Update job progress after each section.
+      9. On completion: persist summary counts and mark COMPLETED.
+
+    Resumability: already-persisted sections (by section label) are skipped
+    on retry so changes are never duplicated (Backend §49).
+    """
+    from app.domain.comparison_rules import (
+        classify_severity,
+        compute_proportion_changed,
+        is_critical_section as check_critical,
+    )
+    from app.domain.section_alignment import align_sections
+    from app.domain.text_diff import diff_text, proportion_from_diff
+    from app.models.document import DocumentSection
+    from app.models.organization import Organization
+    from app.rag.comparison_narration import classify_section_semantically
+    from app.repositories.document_comparison_repository import DocumentComparisonRepository
+    from app.repositories.document_section_repository import DocumentSectionRepository
+    from app.repositories.document_chunk_repository import DocumentChunkRepository
+    from sqlalchemy import select
+
+    job_repo = ProcessingJobRepository(session)
+    comp_repo = DocumentComparisonRepository(session)
+    section_repo = DocumentSectionRepository(session)
+    chunk_repo = DocumentChunkRepository(session)
+
+    comparison_id = comparison.id  # type: ignore[attr-defined]
+    version_a_id = comparison.document_a_version_id  # type: ignore[attr-defined]
+    version_b_id = comparison.document_b_version_id  # type: ignore[attr-defined]
+    org_id = comparison.organization_id  # type: ignore[attr-defined]
+
+    await job_repo.mark_progress(job, progress=2, message="Loading sections…")
+
+    # 1. Load sections for both versions
+    sections_a = await section_repo.list_for_version(version_a_id)
+    sections_b = await section_repo.list_for_version(version_b_id)
+
+    # 2. Load critical_sections config from org settings
+    org_result = await session.execute(
+        select(Organization).where(Organization.id == org_id)
+    )
+    org = org_result.scalar_one_or_none()
+    critical_patterns: list[str] = []
+    if org is not None:
+        try:
+            comp_settings = (org.settings or {}).get("comparison", {})
+            critical_patterns = comp_settings.get("critical_sections", [])
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 3. Align sections
+    await job_repo.mark_progress(job, progress=5, message="Aligning sections…")
+    alignments, alignment_degraded = align_sections(
+        sections_a, sections_b, embedding_lookup=None  # embeddings skipped in V1
+    )
+
+    total_sections = len(alignments)
+    if total_sections == 0:
+        # No sections at all — mark completed with empty summary
+        async with _atomic(session):
+            await comp_repo.update_status(
+                comparison, "COMPLETED",
+                summary={"total": 0, "major": 0, "moderate": 0, "minor": 0,
+                         "alignment_degraded": alignment_degraded},
+            )
+        return
+
+    # 4. Skip already-persisted sections (resumability)
+    done_sections = await comp_repo.list_done_sections(comparison_id)
+
+    # 5. Resolve LLM provider for semantic calls (may be None — graceful degradation)
+    try:
+        from app.infrastructure.llm import get_llm_provider
+        llm_provider = get_llm_provider()
+    except Exception:  # noqa: BLE001
+        llm_provider = None
+
+    await job_repo.mark_progress(job, progress=10, message="Comparing sections…")
+
+    section_idx = 0
+    for alignment in alignments:
+        section_idx += 1
+        sec_a = alignment.section_a
+        sec_b = alignment.section_b
+
+        # Section label for dedup / resume — MUST be byte-identical to the
+        # value persisted in comparison_changes.section below (title-first),
+        # or the done_sections resume check never matches (Task 8 point 4).
+        if alignment.match_method == "whole_document":
+            section_label = "(whole document)"
+        else:
+            sec = sec_a or sec_b
+            section_label = (
+                getattr(sec, "title", None)
+                or getattr(sec, "section_number", None)
+                or f"section_{section_idx}"
+            )
+
+        if section_label in done_sections:
+            continue  # already persisted on a previous attempt
+
+        # Progress update
+        progress = 10 + int(80 * section_idx / total_sections)
+        await job_repo.mark_progress(
+            job, progress=progress,
+            message=f"Comparing section {section_idx}/{total_sections}…"
+        )
+
+        # Handle whole-document fallback
+        if alignment.match_method == "whole_document":
+            await _compare_whole_document(
+                session, comp_repo, comparison, job,
+                version_a_id, version_b_id,
+                critical_patterns, llm_provider,
+                section_label,
+            )
+            await session.commit()
+            continue
+
+        # ADDED: section exists only in B
+        if sec_a is None and sec_b is not None:
+            is_crit = check_critical(
+                getattr(sec_b, "title", None),
+                getattr(sec_b, "section_number", None),
+                critical_patterns,
+            )
+            severity = classify_severity(
+                change_type="ADDED",
+                semantic_materiality=None,
+                is_critical_section=is_crit,
+                proportion_changed=1.0,
+            )
+            # Get representative chunk for new_chunk_id
+            new_chunks = await chunk_repo.list_for_section(
+                getattr(sec_b, "id", None) or ""
+            ) if hasattr(chunk_repo, "list_for_section") else []
+            new_chunk_id = new_chunks[0].id if new_chunks else None
+            new_text = " ".join(c.content for c in new_chunks[:3]) if new_chunks else None
+            async with _atomic(session):
+                await comp_repo.add_change(
+                    comparison_id,
+                    change_type="ADDED",
+                    severity=severity,
+                    section=section_label,
+                    new_chunk_id=new_chunk_id,
+                    new_text=new_text,
+                )
+            continue
+
+        # REMOVED: section exists only in A
+        if sec_b is None and sec_a is not None:
+            is_crit = check_critical(
+                getattr(sec_a, "title", None),
+                getattr(sec_a, "section_number", None),
+                critical_patterns,
+            )
+            severity = classify_severity(
+                change_type="REMOVED",
+                semantic_materiality=None,
+                is_critical_section=is_crit,
+                proportion_changed=1.0,
+            )
+            old_chunks = await chunk_repo.list_for_section(
+                getattr(sec_a, "id", None) or ""
+            ) if hasattr(chunk_repo, "list_for_section") else []
+            old_chunk_id = old_chunks[0].id if old_chunks else None
+            old_text = " ".join(c.content for c in old_chunks[:3]) if old_chunks else None
+            async with _atomic(session):
+                await comp_repo.add_change(
+                    comparison_id,
+                    change_type="REMOVED",
+                    severity=severity,
+                    section=section_label,
+                    old_chunk_id=old_chunk_id,
+                    old_text=old_text,
+                )
+            continue
+
+        # MODIFIED: both sides present — run text diff
+        if sec_a is None or sec_b is None:
+            continue  # shouldn't happen but guard defensively
+
+        is_crit = check_critical(
+            getattr(sec_a, "title", None),
+            getattr(sec_a, "section_number", None),
+            critical_patterns,
+        )
+
+        # Get chunk content for both sides
+        old_chunks = await chunk_repo.list_for_section(
+            getattr(sec_a, "id", None) or ""
+        ) if hasattr(chunk_repo, "list_for_section") else []
+        new_chunks = await chunk_repo.list_for_section(
+            getattr(sec_b, "id", None) or ""
+        ) if hasattr(chunk_repo, "list_for_section") else []
+
+        old_text_full = " ".join(getattr(c, "content", "") for c in old_chunks)
+        new_text_full = " ".join(getattr(c, "content", "") for c in new_chunks)
+
+        # Content-hash short-circuit (§9.5 step 1): if chunk hashes are all identical, skip
+        old_hashes = [getattr(c, "content_hash", None) for c in old_chunks]
+        new_hashes = [getattr(c, "content_hash", None) for c in new_chunks]
+        if old_hashes and old_hashes == new_hashes:
+            # UNCHANGED — not persisted
+            continue
+
+        # §9.5: full text diff
+        diff_result = diff_text(old_text_full, new_text_full)
+        if diff_result.is_unchanged:
+            continue  # formatting-only — absorbed as UNCHANGED
+
+        proportion = proportion_from_diff(diff_result)
+
+        # §9.6: semantic materiality call (LLM, bounded, graceful)
+        materiality: str | None = None
+        truncated = False
+        if llm_provider is not None:
+            try:
+                materiality, truncated = await classify_section_semantically(
+                    old_text_full,
+                    new_text_full,
+                    provider=llm_provider,
+                )
+            except Exception:  # noqa: BLE001
+                materiality = None
+                truncated = False
+
+        # §9.8: severity classification
+        severity = classify_severity(
+            change_type="MODIFIED",
+            semantic_materiality=materiality,  # type: ignore[arg-type]
+            is_critical_section=is_crit,
+            proportion_changed=proportion,
+        )
+
+        old_chunk_id = old_chunks[0].id if old_chunks else None
+        new_chunk_id = new_chunks[0].id if new_chunks else None
+
+        async with _atomic(session):
+            await comp_repo.add_change(
+                comparison_id,
+                change_type="MODIFIED",
+                severity=severity,
+                section=section_label,
+                old_chunk_id=old_chunk_id,
+                new_chunk_id=new_chunk_id,
+                old_text=old_text_full[:2000] if old_text_full else None,
+                new_text=new_text_full[:2000] if new_text_full else None,
+                truncated=truncated,
+            )
+
+    # 6. Build summary and mark COMPLETED
+    await job_repo.mark_progress(job, progress=98, message="Finalising…")
+    counts = await comp_repo.count_by_severity(comparison_id)
+    total = sum(counts.values())
+    summary = {
+        "total": total,
+        "major": counts.get("MAJOR", 0),
+        "moderate": counts.get("MODERATE", 0),
+        "minor": counts.get("MINOR", 0),
+        "alignment_degraded": alignment_degraded,
+    }
+    async with _atomic(session):
+        await comp_repo.update_status(
+            comparison, "COMPLETED", summary=summary
+        )
+    logger.info(
+        "handle_comparison: comparison=%s total_changes=%d major=%d moderate=%d minor=%d",
+        comparison_id, total, counts.get("MAJOR", 0),
+        counts.get("MODERATE", 0), counts.get("MINOR", 0),
+    )
+
+
+async def _compare_whole_document(
+    session: AsyncSession,
+    comp_repo: object,
+    comparison: object,
+    job: ProcessingJob,
+    version_a_id: str,
+    version_b_id: str,
+    critical_patterns: list[str],
+    llm_provider: object | None,
+    section_label: str,
+) -> None:
+    """Whole-document fallback comparison when section alignment is degraded (§9.4)."""
+    from app.domain.comparison_rules import classify_severity
+    from app.domain.text_diff import diff_text, proportion_from_diff
+    from app.rag.comparison_narration import classify_section_semantically
+    from app.repositories.document_chunk_repository import DocumentChunkRepository
+
+    chunk_repo = DocumentChunkRepository(session)
+
+    # Load all chunks (no section filter — whole document)
+    old_chunks = await chunk_repo.list_for_version_text(version_a_id)
+    new_chunks = await chunk_repo.list_for_version_text(version_b_id)
+
+    old_text = " ".join(getattr(c, "content", "") for c in old_chunks)
+    new_text = " ".join(getattr(c, "content", "") for c in new_chunks)
+
+    diff_result = diff_text(old_text, new_text)
+    if diff_result.is_unchanged:
+        return
+
+    proportion = proportion_from_diff(diff_result)
+    materiality = None
+    truncated = False
+    if llm_provider is not None:
+        try:
+            materiality, truncated = await classify_section_semantically(
+                old_text, new_text, provider=llm_provider  # type: ignore[arg-type]
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    severity = classify_severity(
+        change_type="MODIFIED",
+        semantic_materiality=materiality,  # type: ignore[arg-type]
+        is_critical_section=False,
+        proportion_changed=proportion,
+    )
+    await comp_repo.add_change(  # type: ignore[attr-defined]
+        comparison.id,  # type: ignore[attr-defined]
+        change_type="MODIFIED",
+        severity=severity,
+        section="(whole document)",
+        old_text=old_text[:2000] if old_text else None,
+        new_text=new_text[:2000] if new_text else None,
+        truncated=truncated,
+    )
 
 
 # ── The single Arq job function ───────────────────────────────────────────────
@@ -462,6 +941,10 @@ async def run_processing_job(ctx: dict[str, Any], job_id: str) -> str:
         except Exception:
             await session.rollback()
             raise
+
+        # ── Dispatch: COMPARISON jobs take a separate path ────────────────────
+        if JobType(job.job_type) is JobType.COMPARISON:
+            return await _run_comparison_job(ctx, job, session)
 
         # ── Load referenced entity FRESH + validate tenancy ───────────────
         ver_repo = DocumentVersionRepository(session)

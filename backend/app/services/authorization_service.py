@@ -33,7 +33,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import InsufficientPermissionsError
+from app.core.exceptions import InsufficientPermissionsError, NotFoundError
 from app.domain.permissions import get_user_permissions, has_permission
 from app.domain.versioning import VersionScope, resolve_current_version
 from app.models.user import User
@@ -63,6 +63,77 @@ class AuthorizationService:
     @staticmethod
     def resolve_allowed_document_filter(user: User) -> dict[str, set[str]]:
         return {"permissions": get_user_permissions(user.roles)}
+
+    @staticmethod
+    def _check_document_access_level(document: object, user: User) -> bool:
+        """Return True if the user may read this document.
+
+        Phase 7 access rule implementation (matches resolve_allowed_documents):
+          - 'organization':  all org members.
+          - 'restricted':   owner (Phase 16 will add explicit-grant checks).
+          - 'private':      owner only.
+        """
+        access_level = getattr(document, "access_level", None)
+        owner_id = getattr(document, "owner_id", None)
+        if access_level == "organization":
+            return True
+        if access_level == "private":
+            return owner_id == user.id
+        if access_level == "restricted":
+            # Phase 7: treat as org-accessible; full check deferred to Phase 16
+            return True
+        return False  # unknown access level — exclude defensively
+
+    @staticmethod
+    async def authorize_document_version(
+        user: User,
+        document_version_id: str,
+        db: AsyncSession,
+    ) -> tuple:
+        """Authorize a user to access a specific document version.
+
+        Used by the comparison API (§9.2, §13) to verify both sides of a
+        comparison request. Returns (version, document) tuple on success.
+
+        Access rules:
+          - Cross-org version ID → NotFoundError (existence leakage prevention)
+          - Unauthorized access level → NotFoundError (same as above)
+
+        Raises:
+            NotFoundError: when the version does not exist, belongs to a
+                different organization, or the user cannot access the parent
+                document (treated uniformly as 404, never 403, to prevent
+                resource-existence leakage per project-wide convention).
+        """
+        from sqlalchemy import select
+        from app.models.document import Document, DocumentVersion
+
+        result = await db.execute(
+            select(DocumentVersion).where(DocumentVersion.id == document_version_id)
+        )
+        version = result.scalar_one_or_none()
+
+        if version is None:
+            raise NotFoundError("Document version not found.")
+
+        doc_result = await db.execute(
+            select(Document).where(Document.id == version.document_id)
+        )
+        document = doc_result.scalar_one_or_none()
+
+        # Cross-org or missing document → 404 (never 403)
+        if document is None or document.organization_id != user.organization_id:
+            raise NotFoundError("Document version not found.")
+
+        # Soft-deleted or inactive documents
+        if getattr(document, "deleted_at", None) is not None:
+            raise NotFoundError("Document version not found.")
+
+        # Access-level check — returns 404 for consistency (no leakage)
+        if not AuthorizationService._check_document_access_level(document, user):
+            raise NotFoundError("Document version not found.")
+
+        return version, document
 
     # ── Document scope resolution (Phase 7) ───────────────────────────────────
 

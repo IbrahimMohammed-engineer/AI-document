@@ -105,6 +105,7 @@ async def upload_document(
     access_level: str = Form("organization"),
     version_label: Optional[str] = Form(None),
     effective_date: Optional[str] = Form(None, description="ISO date (YYYY-MM-DD)"),
+    expiration_date: Optional[str] = Form(None, description="ISO date (YYYY-MM-DD); must be on or after effective_date"),
     document_id: Optional[str] = Form(None, alias="documentId"),
     user: User = Depends(require_permission("document:create")),
 ) -> DocumentUploadResponse:
@@ -127,6 +128,7 @@ async def upload_document(
         access_level=access_level,
         version_label=version_label,
         effective_date=effective_date,
+        expiration_date=expiration_date,
         existing_document_id=document_id,
         db=db,
         request=request,

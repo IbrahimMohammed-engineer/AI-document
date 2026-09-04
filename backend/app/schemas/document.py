@@ -62,6 +62,8 @@ class DocumentVersionDetail(DocumentVersionSummary):
     document_id: str
     storage_key: str
     checksum_sha256: Optional[str] = None
+    # Phase 12: derived version state label (never stored, computed per §8.6)
+    state: Optional[str] = None  # CURRENT | SUPERSEDED | SCHEDULED | None
 
 
 # ── Document response ─────────────────────────────────────────────────────────

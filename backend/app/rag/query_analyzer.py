@@ -61,9 +61,10 @@ VALID_INTENTS: tuple[str, ...] = (
     "SUMMARY", "CONFLICT_DETECTION", "EXTRACTION",
 )
 
-# Intents whose dedicated services do not exist until Phases 12–14
+# Phase 12: COMPARISON and CHANGE_DETECTION are now implemented; they are
+# removed from DEFERRED_INTENTS so analyze_query does not log a warning.
 DEFERRED_INTENTS: frozenset[str] = frozenset(
-    {"COMPARISON", "CHANGE_DETECTION", "SUMMARY", "CONFLICT_DETECTION", "EXTRACTION"}
+    {"SUMMARY", "CONFLICT_DETECTION", "EXTRACTION"}
 )
 
 _FAST_TIMEOUT_SECONDS = 5.0  # Backend §51 — fast classification calls
@@ -77,6 +78,9 @@ class QueryAnalysis:
 
     intent: QueryIntent = "QUESTION"
     temporal_scope: dict | None = None
+    # Phase 12: secondary temporal reference for COMPARISON / CHANGE_DETECTION
+    # queries that reference two distinct dates (e.g. "changes between 2024 and 2025").
+    temporal_scope_secondary: dict | None = None
     scope_hints: list[str] = field(default_factory=list)
     topic: str | None = None
     # False when the stage degraded to the default (LLM failure / parse
@@ -86,7 +90,7 @@ class QueryAnalysis:
 
     @property
     def is_deferred_intent(self) -> bool:
-        """True when the intent routes to a Phase 12–14 service."""
+        """True when the intent routes to a Phase 14+ service."""
         return self.intent in DEFERRED_INTENTS
 
 
@@ -165,6 +169,10 @@ def parse_analyzer_output(raw: str) -> QueryAnalysis:
     return QueryAnalysis(
         intent=intent,  # type: ignore[arg-type]
         temporal_scope=_parse_temporal_scope(data.get("temporal_scope")),
+        # Phase 12: parse secondary temporal reference (additive, not in prompt
+        # yet — populated when the LLM emits an extra "temporal_scope_secondary"
+        # key or when we detect two year values in the raw temporal_scope list).
+        temporal_scope_secondary=_parse_temporal_scope(data.get("temporal_scope_secondary")),
         scope_hints=scope_hints,
         topic=topic,
     )

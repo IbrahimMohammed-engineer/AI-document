@@ -402,6 +402,91 @@ class ChatService:
         ask_service = AskService(self._db)
         scope_label = _SCOPE_LABELS[context.conversation.scope_type]
 
+        # ── Phase 12: COMPARISON / CHANGE_DETECTION intent routing ─────────────
+        # Attempt to resolve comparison targets deterministically (code-driven,
+        # no LLM) from the conversation scope and query analysis (§14):
+        #   - unresolved targets → persisted clarifying message (never a
+        #     fabricated comparison, never a generic-RAG guess)
+        #   - PENDING/PROCESSING → persisted "ask again shortly" notice; the
+        #     SSE stream never blocks on the multi-minute worker job
+        #   - COMPLETED → narrated, citation-backed answer persisted as a
+        #     normal ASSISTANT Message + Citations (reused result, no recompute)
+        try:
+            from app.rag.query_analyzer import analyze_query
+            from app.services.comparison_service import ComparisonService
+
+            analysis = await analyze_query(context.user_message.content)
+            if analysis.intent in ("COMPARISON", "CHANGE_DETECTION"):
+                targets = await ComparisonService.resolve_comparison_targets_from_chat(
+                    conversation=context.conversation,
+                    analysis=analysis,
+                    db=self._db,
+                )
+                if targets is None:
+                    logger.info(
+                        "ChatService: COMPARISON/CHANGE_DETECTION intent but "
+                        "could not resolve targets deterministically — clarifying"
+                    )
+                    outcome = await self._persist_comparison_turn(
+                        user,
+                        context,
+                        content=(
+                            "I can compare two document versions for you, but I "
+                            "couldn't determine which ones you mean. Try selecting "
+                            "exactly two documents in the conversation scope, or — "
+                            "for the current document — ask about two specific "
+                            "years, e.g. \"what changed between 2025 and 2026?\""
+                        ),
+                        resolved_citations=[],
+                    )
+                    yield ChatStreamEvent(type="done", outcome=outcome)
+                    return
+
+                version_a_id, version_b_id = targets
+                comparison, created = await ComparisonService.get_or_create_comparison(
+                    user=user,
+                    document_a_version_id=version_a_id,
+                    document_b_version_id=version_b_id,
+                    db=self._db,
+                )
+
+                if comparison.status != "COMPLETED":
+                    logger.info(
+                        "ChatService: comparison %s is %s — acknowledging without "
+                        "blocking the stream (user re-asks once completed)",
+                        comparison.id, comparison.status,
+                    )
+                    outcome = await self._persist_comparison_turn(
+                        user,
+                        context,
+                        content=(
+                            "Comparing these versions now — this can take a "
+                            "moment. Ask again shortly and I'll summarize the "
+                            "detected changes."
+                        ),
+                        resolved_citations=[],
+                        comparison_id=comparison.id,
+                    )
+                    yield ChatStreamEvent(type="done", outcome=outcome)
+                    return
+
+                # COMPLETED → serve the persisted result (reuse check above made
+                # this free), narrate it (phrasing-only LLM call, §14), persist
+                # as a normal ASSISTANT Message + Citations (§9.9 path 2).
+                outcome = await self._narrate_comparison_outcome(user, context, comparison)
+                for citation in outcome.citations:
+                    yield ChatStreamEvent(type="citation", citation=citation)
+                yield ChatStreamEvent(
+                    type="done",
+                    conversation_id=context.conversation.id,
+                    outcome=outcome,
+                )
+                return
+        except Exception:  # noqa: BLE001 — graceful degradation
+            logger.exception(
+                "ChatService: comparison routing failed — falling through to RAG"
+            )
+
         async for event in ask_service.ask_stream(
             context.user_message.content,
             user,
@@ -444,6 +529,142 @@ class ChatService:
             elif event.type == "sources":
                 # The chat protocol folds sources into the done payload.
                 continue
+
+    # ── Phase 12: comparison-turn helpers (§14) ────────────────────────────────
+
+    async def _persist_comparison_turn(
+        self,
+        user: User,
+        context: "ChatMessageContext",
+        *,
+        content: str,
+        resolved_citations: list[ResolvedCitation],
+        comparison_id: str | None = None,
+    ) -> AskOutcome:
+        """Persist one comparison-path ASSISTANT turn and build its outcome.
+
+        Reuses the exact atomic message+citations write path the RAG pipeline
+        uses (MessageRepository + conversation recency bump, one transaction —
+        Backend §50), then folds everything the FE needs into an AskOutcome.
+        A persistence failure never corrupts the stream: the answer was
+        already computed, and the write rolls back whole.
+        """
+        repo = MessageRepository(self._db)
+        message_id: str | None = None
+        try:
+            message = await repo.save_assistant_message_with_citations(
+                content=content,
+                groundedness="grounded",
+                citations=resolved_citations,
+                conversation_id=context.conversation.id,
+                message_id=context.assistant_message_id,
+            )
+            await ConversationRepository(self._db).bump_updated_at(context.conversation.id)
+            await self._db.commit()
+            message_id = message.id
+        except Exception:
+            logger.exception(
+                "ChatService: comparison-turn persistence failed "
+                "(conversation=%s) — neither row persisted",
+                context.conversation.id,
+            )
+            await self._db.rollback()
+
+        outcome = AskOutcome(
+            question=context.user_message.content,
+            groundedness="grounded",
+            answer_text=content,
+            final_answer=content,
+            message_id=message_id,
+        )
+        if comparison_id is not None:
+            outcome.comparison_id = comparison_id  # type: ignore[attr-defined]
+        if resolved_citations:
+            version_info = await AskService(self._db)._load_version_info(
+                {c.document_version_id for c in resolved_citations}
+            )
+            outcome.citations = [
+                AskService._to_ask_citation(c, version_info)
+                for c in resolved_citations
+            ]
+        return outcome
+
+    async def _narrate_comparison_outcome(
+        self,
+        user: User,
+        context: "ChatMessageContext",
+        comparison: object,
+    ) -> AskOutcome:
+        """Narrate a COMPLETED comparison and persist the answer + citations.
+
+        The narration LLM call only phrases the already-classified
+        comparison_changes rows (Backend §41); citations attach one per
+        narrated change, pointing at the NEW side's chunk (falling back to
+        the OLD side when the new chunk was deleted) — plan §9.9 path 2.
+        """
+        from app.infrastructure.llm import get_llm_provider
+        from app.rag.citations import QuotedSpan
+        from app.rag.comparison_narration import _fallback_narration, narrate_changes
+        from app.repositories.document_comparison_repository import (
+            DocumentComparisonRepository,
+        )
+        from app.services.comparison_service import ComparisonService
+
+        repo = DocumentComparisonRepository(self._db)
+        changes = await repo.list_changes(comparison.id)  # type: ignore[attr-defined]
+
+        provider = get_llm_provider()
+        if provider is not None:
+            narration = await narrate_changes(changes, provider=provider)
+        else:
+            narration = _fallback_narration(changes)
+
+        # ── Citations: one per change (bounded), new side preferred ────────
+        resolved: list[ResolvedCitation] = []
+        if changes:
+            chunk_ids: list[str] = []
+            for c in changes:
+                for cid in (c.new_chunk_id, c.old_chunk_id):
+                    if cid:
+                        chunk_ids.append(cid)
+            provenance = await ComparisonService.resolve_chunk_provenance(
+                self._db, chunk_ids
+            )
+            for i, c in enumerate(changes[:10], start=1):
+                chunk_id = c.new_chunk_id or c.old_chunk_id
+                info = provenance.get(chunk_id or "")
+                if not chunk_id or info is None:
+                    continue  # chunk deleted — snapshot text still in narration
+                snippet = (info["content"] or "")[:300]
+                if not snippet:
+                    snippet = (c.new_text or c.old_text or "")[:300]
+                resolved.append(
+                    ResolvedCitation(
+                        index=i,
+                        chunk_id=chunk_id,
+                        document_id=info["document_id"],
+                        document_version_id=info["document_version_id"],
+                        document_name=info["document_name"],
+                        page_id=info["page_id"],
+                        page_number=info["page_number"],
+                        section=info["section"],
+                        relevance=1.0,
+                        quoted=QuotedSpan(
+                            text=snippet,
+                            char_start=0,
+                            char_end=len(snippet),
+                        ),
+                        claim_text=f"{c.change_type} in {c.section or 'document'}",
+                    )
+                )
+
+        return await self._persist_comparison_turn(
+            user,
+            context,
+            content=narration,
+            resolved_citations=resolved,
+            comparison_id=comparison.id,  # type: ignore[attr-defined]
+        )
 
     # ── History read (conversation detail) ────────────────────────────────────
 

@@ -32,6 +32,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin, generate_uuid
 
 if TYPE_CHECKING:
+    from app.models.comparison import DocumentComparison
     from app.models.document import DocumentVersion
     from app.models.organization import Organization
 
@@ -68,9 +69,15 @@ class ProcessingJob(Base, TimestampMixin):
             "attempts >= 0 AND max_attempts >= 1",
             name="ck_processing_jobs_attempts",
         ),
+        # Phase 12: comparison jobs must have comparison_id; non-comparison jobs must not
+        CheckConstraint(
+            "(job_type = 'COMPARISON') = (comparison_id IS NOT NULL)",
+            name="ck_processing_jobs_comparison_pairing",
+        ),
         Index("ix_processing_jobs_document_version_id", "document_version_id", "status"),
         Index("ix_processing_jobs_status", "status", "created_at"),
         Index("ix_processing_jobs_org_status", "organization_id", "status"),
+        Index("ix_processing_jobs_comparison_id", "comparison_id"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -89,6 +96,14 @@ class ProcessingJob(Base, TimestampMixin):
         UUID(as_uuid=False),
         ForeignKey("document_versions.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    # Phase 12 — set only for job_type=COMPARISON; document_version_id holds
+    # the anchor (A) version for indexing/bookkeeping (§10, Gap 3).
+    comparison_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_comparisons.id", ondelete="CASCADE"),
+        nullable=True,
+        comment="Set only for job_type=COMPARISON; document_version_id holds the anchor (A) version",
     )
     job_type: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[str] = mapped_column(
@@ -126,6 +141,11 @@ class ProcessingJob(Base, TimestampMixin):
     document_version: Mapped[DocumentVersion] = relationship(
         "DocumentVersion",
         foreign_keys=[document_version_id],
+        lazy="noload",
+    )
+    comparison: Mapped[Optional[DocumentComparison]] = relationship(
+        "DocumentComparison",
+        foreign_keys=[comparison_id],
         lazy="noload",
     )
 

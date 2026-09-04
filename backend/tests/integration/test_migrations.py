@@ -366,3 +366,160 @@ async def test_migration_011_downgrade_upgrade_cycle(async_database_url, run_mig
     assert {"conversations", "conversation_documents", "message_feedback"} <= tables, (
         "conversation tables must exist again after the downgrade/upgrade cycle"
     )
+
+
+# ── Phase 12 — comparisons (migration 012, plan §10) ──────────────────────────
+
+@pytest.mark.integration
+async def test_comparison_tables_and_constraints(async_database_url, run_migrations):
+    """Migration 012 must create document_comparisons / comparison_changes
+    per plan §10 with the CHECK constraints, the unique pair constraint,
+    the RESTRICT version FKs, the SET NULL chunk FKs, the CASCADE from
+    processing_jobs, and the COMPARISON-pairing CHECK."""
+    engine = create_async_engine(async_database_url, echo=False)
+    async with engine.connect() as conn:
+        tables = {
+            row[0]
+            for row in (
+                await conn.execute(sa.text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public'"
+                ))
+            ).fetchall()
+        }
+        assert {"document_comparisons", "comparison_changes"} <= tables
+
+        constraints = {
+            row[0]
+            for row in (
+                await conn.execute(sa.text(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conrelid IN ("
+                    "'document_comparisons'::regclass, "
+                    "'comparison_changes'::regclass, "
+                    "'processing_jobs'::regclass)"
+                ))
+            ).fetchall()
+        }
+        assert {
+            "ck_document_comparisons_status",
+            "ck_document_comparisons_distinct_versions",
+            "uq_document_comparisons_pair",
+            "ck_comparison_changes_change_type",
+            "ck_comparison_changes_severity",
+            "ck_comparison_changes_added_no_old",
+            "ck_comparison_changes_removed_no_new",
+            "ck_processing_jobs_comparison_pairing",
+        } <= constraints
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+async def test_comparison_change_check_constraints_enforced(
+    async_database_url, run_migrations
+):
+    """Functional CHECK verification (plan §10 acceptance): the
+    comparison_changes CHECKs reject an invalid change_type / severity and an
+    ADDED row carrying old_chunk_id (REMOVED symmetric); a minimal valid row
+    inserts; a COMPARISON job without comparison_id violates the pairing
+    CHECK.  All inside a transaction that is rolled back."""
+    engine = create_async_engine(async_database_url, echo=False)
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("SAVEPOINT seed"))
+        try:
+            org_id = str((await conn.execute(sa.text(
+                "INSERT INTO organizations (id, name, slug) "
+                "VALUES (gen_random_uuid(), 'mig12-org', 'mig12-org') RETURNING id"
+            ))).scalar_one())
+            user_id = str((await conn.execute(sa.text(
+                "INSERT INTO users (id, organization_id, email, full_name, password_hash) "
+                "VALUES (gen_random_uuid(), :org, 'mig12@x.test', 'Mig', 'x') RETURNING id"
+            ), {"org": org_id})).scalar_one())
+            doc_id = str((await conn.execute(sa.text(
+                "INSERT INTO documents (id, organization_id, owner_id, name, document_type) "
+                "VALUES (gen_random_uuid(), :org, :owner, 'Mig Doc', 'policy') RETURNING id"
+            ), {"org": org_id, "owner": user_id})).scalar_one())
+
+            async def _new_version(number: int) -> str:
+                return str((await conn.execute(sa.text(
+                    "INSERT INTO document_versions (id, document_id, version_number, "
+                    "storage_key, mime_type, file_size_bytes, status, created_by) "
+                    "VALUES (gen_random_uuid(), :doc, :n, 'k', 'application/pdf', 1, "
+                    "'READY', :owner) RETURNING id"
+                ), {"doc": doc_id, "n": number, "owner": user_id})).scalar_one())
+
+            ver_a, ver_b = await _new_version(1), await _new_version(2)
+            page_id = str((await conn.execute(sa.text(
+                "INSERT INTO document_pages (id, document_version_id, page_number, text) "
+                "VALUES (gen_random_uuid(), :ver, 1, 'text') RETURNING id"
+            ), {"ver": ver_a})).scalar_one())
+            chunk_id = str((await conn.execute(sa.text(
+                "INSERT INTO document_chunks (id, organization_id, document_version_id, "
+                "page_id, chunk_index, content, content_hash, token_count) "
+                "VALUES (gen_random_uuid(), :org, :ver, :page, 0, 'c', :h, 1) RETURNING id"
+            ), {"org": org_id, "ver": ver_a, "page": page_id,
+                "h": "0" * 64})).scalar_one())
+            cmp_id = str((await conn.execute(sa.text(
+                "INSERT INTO document_comparisons (id, organization_id, "
+                "document_a_version_id, document_b_version_id, status, requested_by) "
+                "VALUES (gen_random_uuid(), :org, :va, :vb, 'PENDING', :owner) RETURNING id"
+            ), {"org": org_id, "va": ver_a, "vb": ver_b,
+                "owner": user_id})).scalar_one())
+
+            async def _must_raise(stmt: str, label: str) -> None:
+                await conn.execute(sa.text("SAVEPOINT bad"))
+                raised = False
+                try:
+                    await conn.execute(sa.text(stmt))
+                except Exception:
+                    raised = True
+                finally:
+                    await conn.execute(sa.text("ROLLBACK TO SAVEPOINT bad"))
+                assert raised, f"{label} must be rejected"
+
+            base = (
+                "INSERT INTO comparison_changes (comparison_id, change_type, severity"
+            )
+            await _must_raise(
+                base + f") VALUES ('{cmp_id}', 'BOGUS', 'MAJOR')",
+                "invalid change_type",
+            )
+            await _must_raise(
+                base + f") VALUES ('{cmp_id}', 'MODIFIED', 'HUGE')",
+                "invalid severity",
+            )
+            await _must_raise(
+                base + f", old_chunk_id) VALUES ('{cmp_id}', 'ADDED', 'MINOR', "
+                f"'{chunk_id}')",
+                "ADDED carrying old_chunk_id",
+            )
+            await _must_raise(
+                base + f", new_chunk_id) VALUES ('{cmp_id}', 'REMOVED', 'MINOR', "
+                f"'{chunk_id}')",
+                "REMOVED carrying new_chunk_id",
+            )
+
+            # Control: a minimal valid row inserts
+            await conn.execute(sa.text(
+                base + f") VALUES ('{cmp_id}', 'MODIFIED', 'MINOR')"
+            ))
+
+            # Pairing CHECK: a non-COMPARISON job with comparison_id → rejected;
+            # a COMPARISON job with comparison_id → accepted
+            await _must_raise(
+                "INSERT INTO processing_jobs (id, organization_id, "
+                "document_version_id, job_type, comparison_id) "
+                f"VALUES (gen_random_uuid(), '{org_id}', '{ver_a}', 'EXTRACTION', "
+                f"'{cmp_id}')",
+                "non-COMPARISON job with comparison_id",
+            )
+            await conn.execute(sa.text(
+                "INSERT INTO processing_jobs (id, organization_id, "
+                "document_version_id, job_type, comparison_id) "
+                f"VALUES (gen_random_uuid(), '{org_id}', '{ver_a}', 'COMPARISON', "
+                f"'{cmp_id}')"
+            ))
+        finally:
+            await conn.execute(sa.text("ROLLBACK TO SAVEPOINT seed"))
+    await engine.dispose()

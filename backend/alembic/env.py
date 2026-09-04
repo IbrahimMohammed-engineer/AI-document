@@ -48,6 +48,11 @@ from app.models.conversation import (  # noqa: F401
     ConversationDocument,
     MessageFeedback,
 )
+# Phase 12 — document comparison models
+from app.models.comparison import (  # noqa: F401
+    ComparisonChange,
+    DocumentComparison,
+)
 
 # ─── Alembic Config ───────────────────────────────────────────────────────────
 

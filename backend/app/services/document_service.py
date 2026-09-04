@@ -157,6 +157,7 @@ class DocumentService:
         access_level: str = "organization",
         version_label: str | None = None,
         effective_date: str | None = None,
+        expiration_date: str | None = None,
         # Supply to add as a new version of an existing document
         existing_document_id: str | None = None,
         db: AsyncSession = None,  # type: ignore[assignment]
@@ -311,12 +312,33 @@ class DocumentService:
                 version_label=version_label,
                 status="UPLOADED",
             )
+            # ── Phase 12 (§8.5): parse + validate the effective window.
+            # Malformed dates are now REJECTED (422) instead of silently
+            # ignored, and expiration must not precede effective.
+            from datetime import date as _date
+            from app.domain.versioning import validate_effective_window
+
+            parsed_effective: _date | None = None
+            parsed_expiration: _date | None = None
             if effective_date:
-                from datetime import date
                 try:
-                    new_version.effective_date = date.fromisoformat(effective_date)
+                    parsed_effective = _date.fromisoformat(effective_date)
                 except ValueError:
-                    pass  # silently ignore bad dates (validation is at API schema level)
+                    raise ValidationError(
+                        f"Invalid effective_date (expected ISO-8601, got {effective_date!r}).",
+                        field="effective_date",
+                    )
+            if expiration_date:
+                try:
+                    parsed_expiration = _date.fromisoformat(expiration_date)
+                except ValueError:
+                    raise ValidationError(
+                        f"Invalid expiration_date (expected ISO-8601, got {expiration_date!r}).",
+                        field="expiration_date",
+                    )
+            validate_effective_window(parsed_effective, parsed_expiration)
+            new_version.effective_date = parsed_effective
+            new_version.expiration_date = parsed_expiration
 
             db.add(new_version)
             await db.flush()
@@ -518,6 +540,7 @@ class DocumentService:
             raise NotFoundError("Document not found.")
 
         versions = await ver_repo.list_for_document(doc.id)
+        from app.domain.versioning import classify_version_state
         return [
             DocumentVersionDetail(
                 id=v.id,
@@ -535,6 +558,7 @@ class DocumentService:
                 error_message=v.error_message,
                 storage_key=v.storage_key,
                 checksum_sha256=v.checksum_sha256,
+                state=classify_version_state(v, versions),
             )
             for v in versions
         ]

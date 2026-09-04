@@ -236,6 +236,8 @@ _CLEANUP_TABLES = (
     "messages",
     "conversation_documents",
     "conversations",
+    "comparison_changes",
+    "document_comparisons",
     "document_chunks",
     "document_sections",
     "document_pages",
