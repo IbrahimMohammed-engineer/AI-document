@@ -532,6 +532,139 @@ class ChatService:
                     outcome=outcome,
                 )
                 return
+
+            # ── Phase 14: SUMMARY intent routing (§5.12) ──────────────────────
+            # Deterministic target resolution → get-or-create → narrate the
+            # persisted (already-validated) summary.  Narration is a
+            # deterministic re-render — no LLM call (§2.6 point 6).
+            elif analysis.intent == "SUMMARY":
+                from app.services.summary_service import SummaryService
+
+                version_id = await SummaryService.resolve_summary_target_from_chat(
+                    conversation=context.conversation,
+                    analysis=analysis,
+                    db=self._db,
+                )
+                if version_id is None:
+                    logger.info(
+                        "ChatService: SUMMARY intent but zero/multiple documents "
+                        "in scope — clarifying"
+                    )
+                    outcome = await self._persist_comparison_turn(
+                        user,
+                        context,
+                        content=(
+                            "I can summarize a document for you, but I need "
+                            "exactly one document in scope. Select a document "
+                            "in the conversation scope and ask again."
+                        ),
+                        resolved_citations=[],
+                    )
+                    yield ChatStreamEvent(type="done", outcome=outcome)
+                    return
+
+                summary, _created = await SummaryService.get_or_create_summary(
+                    user=user,
+                    document_version_id=version_id,
+                    db=self._db,
+                )
+                if summary.status != "COMPLETED":
+                    logger.info(
+                        "ChatService: summary %s is %s — acknowledging without "
+                        "blocking the stream",
+                        summary.id, summary.status,
+                    )
+                    outcome = await self._persist_comparison_turn(
+                        user,
+                        context,
+                        content=(
+                            "Generating a summary of this document now — ask "
+                            "again shortly and I'll walk you through it."
+                        ),
+                        resolved_citations=[],
+                    )
+                    yield ChatStreamEvent(type="done", outcome=outcome)
+                    return
+
+                outcome = await self._narrate_summary_outcome(user, context, summary)
+                for citation in outcome.citations:
+                    yield ChatStreamEvent(type="citation", citation=citation)
+                yield ChatStreamEvent(
+                    type="done",
+                    conversation_id=context.conversation.id,
+                    outcome=outcome,
+                )
+                return
+
+            # ── Phase 14: EXTRACTION intent routing (§5.12) ───────────────────
+            # Chat-triggered extraction REUSES the latest COMPLETED run for
+            # the resolved version (cost control, §2.6 point 5); narration is
+            # an LLM call phrasing already-persisted items ("narrate, never
+            # originate").
+            elif analysis.intent == "EXTRACTION":
+                from app.services.extraction_service import ExtractionService
+
+                version_id = (
+                    await ExtractionService.resolve_extraction_target_from_chat(
+                        conversation=context.conversation,
+                        analysis=analysis,
+                        db=self._db,
+                    )
+                )
+                if version_id is None:
+                    logger.info(
+                        "ChatService: EXTRACTION intent but zero/multiple documents "
+                        "in scope — clarifying"
+                    )
+                    outcome = await self._persist_comparison_turn(
+                        user,
+                        context,
+                        content=(
+                            "I can extract structured information (requirements, "
+                            "risks, dates, parties) from a document, but I need "
+                            "exactly one document in scope. Select a document "
+                            "and ask again."
+                        ),
+                        resolved_citations=[],
+                    )
+                    yield ChatStreamEvent(type="done", outcome=outcome)
+                    return
+
+                extraction, _created = (
+                    await ExtractionService.get_or_create_run_from_chat(
+                        user=user,
+                        document_version_id=version_id,
+                        db=self._db,
+                    )
+                )
+                if extraction.status != "COMPLETED":
+                    logger.info(
+                        "ChatService: extraction run %s is %s — acknowledging",
+                        extraction.id, extraction.status,
+                    )
+                    outcome = await self._persist_comparison_turn(
+                        user,
+                        context,
+                        content=(
+                            "Running the structured extraction now — ask again "
+                            "shortly and I'll present the results."
+                        ),
+                        resolved_citations=[],
+                    )
+                    yield ChatStreamEvent(type="done", outcome=outcome)
+                    return
+
+                outcome = await self._narrate_extraction_outcome(
+                    user, context, extraction
+                )
+                for citation in outcome.citations:
+                    yield ChatStreamEvent(type="citation", citation=citation)
+                yield ChatStreamEvent(
+                    type="done",
+                    conversation_id=context.conversation.id,
+                    outcome=outcome,
+                )
+                return
         except Exception:  # noqa: BLE001 — graceful degradation
             logger.exception(
                 "ChatService: intent routing failed — falling through to RAG"
@@ -789,6 +922,148 @@ class ChatService:
             context,
             content=narration,
             resolved_citations=resolved,
+        )
+
+    # ── Phase 14: summary/extraction-turn helpers (§5.12) ─────────────────────
+
+    async def _narrate_summary_outcome(
+        self,
+        user: User,
+        context: "ChatMessageContext",
+        summary: object,
+    ) -> AskOutcome:
+        """Narrate a COMPLETED summary — NO LLM call (§2.6 point 6).
+
+        The persisted summary is already prose (validated, citation-tagged);
+        chat narration is a deterministic re-render via narrate_summary, with
+        the summary's own stored citations re-hydrated into ResolvedCitation
+        objects (bounded) and persisted via the shared atomic turn writer.
+        """
+        from app.rag.citations import QuotedSpan
+        from app.rag.summary_narration import narrate_summary
+
+        narration = narrate_summary(summary)
+
+        resolved: list[ResolvedCitation] = []
+        payload = getattr(summary, "summary", None)
+        if isinstance(payload, dict):
+            for field_items in payload.values():
+                if not isinstance(field_items, list):
+                    continue
+                for item in field_items:
+                    if len(resolved) >= 10:
+                        break
+                    if not isinstance(item, dict):
+                        continue
+                    for stored in item.get("citations") or []:
+                        if len(resolved) >= 10:
+                            break
+                        if not isinstance(stored, dict) or not stored.get("chunk_id"):
+                            continue
+                        quoted_text = str(stored.get("quoted_text") or "")
+                        resolved.append(
+                            ResolvedCitation(
+                                index=len(resolved) + 1,
+                                chunk_id=stored["chunk_id"],
+                                document_id=stored.get("document_id") or "",
+                                document_version_id=(
+                                    stored.get("document_version_id") or ""
+                                ),
+                                document_name=(
+                                    stored.get("document_name") or "Unknown document"
+                                ),
+                                page_id=stored.get("page_id") or "",
+                                page_number=int(stored.get("page_number") or 1),
+                                section=stored.get("section"),
+                                relevance=float(stored.get("relevance") or 1.0),
+                                quoted=QuotedSpan(
+                                    text=quoted_text,
+                                    char_start=int(stored.get("char_start") or 0),
+                                    char_end=int(
+                                        stored.get("char_end") or len(quoted_text)
+                                    ),
+                                ),
+                                claim_text=str(item.get("text") or ""),
+                            )
+                        )
+
+        return await self._persist_comparison_turn(
+            user,
+            context,
+            content=narration,
+            resolved_citations=resolved,
+            comparison_id=getattr(summary, "id", None),
+        )
+
+    async def _narrate_extraction_outcome(
+        self,
+        user: User,
+        context: "ChatMessageContext",
+        extraction: object,
+    ) -> AskOutcome:
+        """Narrate a COMPLETED extraction run (§5.11/§5.12).
+
+        One LLM call phrasing ONLY the persisted items ("narrate, never
+        originate"), with the deterministic template fallback when no
+        provider is configured.  Citations attach up to 10 items' stored
+        provenance (bounded — mirrors the changes[:10]/statement[:10] bounds).
+        """
+        from app.infrastructure.llm import get_llm_provider
+        from app.rag.citations import QuotedSpan
+        from app.rag.extraction_narration import (
+            _fallback_extraction_narration,
+            narrate_extraction,
+        )
+        from app.repositories.document_extraction_repository import (
+            DocumentExtractionRepository,
+        )
+        from app.services.comparison_service import ComparisonService
+
+        repo = DocumentExtractionRepository(self._db)
+        items = await repo.list_items(extraction.id)  # type: ignore[attr-defined]
+
+        provider = get_llm_provider()
+        if provider is not None:
+            narration = await narrate_extraction(items, provider=provider)
+        else:
+            narration = _fallback_extraction_narration(items)
+
+        resolved: list[ResolvedCitation] = []
+        if items:
+            provenance = await ComparisonService.resolve_chunk_provenance(
+                self._db, [item.chunk_id for item in items]
+            )
+            for item in items[:10]:
+                info = provenance.get(item.chunk_id)
+                if info is None:
+                    continue  # chunk deleted — snapshot text still in narration
+                snippet = (item.quoted_text or "")[:300]
+                resolved.append(
+                    ResolvedCitation(
+                        index=len(resolved) + 1,
+                        chunk_id=item.chunk_id,
+                        document_id=info["document_id"],
+                        document_version_id=info["document_version_id"],
+                        document_name=info["document_name"],
+                        page_id=info["page_id"],
+                        page_number=info["page_number"],
+                        section=info["section"],
+                        relevance=1.0,
+                        quoted=QuotedSpan(
+                            text=snippet,
+                            char_start=item.char_start or 0,
+                            char_end=item.char_end or len(snippet),
+                        ),
+                        claim_text=item.label,
+                    )
+                )
+
+        return await self._persist_comparison_turn(
+            user,
+            context,
+            content=narration,
+            resolved_citations=resolved,
+            comparison_id=getattr(extraction, "id", None),
         )
 
     # ── History read (conversation detail) ────────────────────────────────────

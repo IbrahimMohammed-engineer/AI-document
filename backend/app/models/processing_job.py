@@ -34,7 +34,9 @@ from app.models.base import Base, TimestampMixin, generate_uuid
 if TYPE_CHECKING:
     from app.models.comparison import DocumentComparison
     from app.models.document import DocumentVersion
+    from app.models.extraction import DocumentExtraction
     from app.models.organization import Organization
+    from app.models.summary import DocumentSummary
 
 
 class ProcessingJob(Base, TimestampMixin):
@@ -54,7 +56,7 @@ class ProcessingJob(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint(
             "job_type IN ('EXTRACTION','OCR','CHUNKING','EMBEDDING','INDEXING',"
-            "'COMPARISON','SUMMARY','CONFLICT_SCAN','PURGE')",
+            "'COMPARISON','SUMMARY','CONFLICT_SCAN','PURGE','STRUCTURED_EXTRACTION')",
             name="ck_processing_jobs_job_type",
         ),
         CheckConstraint(
@@ -74,6 +76,18 @@ class ProcessingJob(Base, TimestampMixin):
             "(job_type = 'COMPARISON') = (comparison_id IS NOT NULL)",
             name="ck_processing_jobs_comparison_pairing",
         ),
+        # Phase 14: SUMMARY jobs must have summary_id; non-summary jobs must not
+        CheckConstraint(
+            "(job_type = 'SUMMARY') = (summary_id IS NOT NULL)",
+            name="ck_processing_jobs_summary_pairing",
+        ),
+        # Phase 14: STRUCTURED_EXTRACTION jobs must have extraction_id; other
+        # jobs must not (EXTRACTION — the Phase 5 ingestion stage — is a
+        # different, unrelated job type).
+        CheckConstraint(
+            "(job_type = 'STRUCTURED_EXTRACTION') = (extraction_id IS NOT NULL)",
+            name="ck_processing_jobs_extraction_pairing",
+        ),
         # Phase 13: every job type except CONFLICT_SCAN must anchor to a
         # version (CONFLICT_SCAN is org-wide — anchored to the organization).
         CheckConstraint(
@@ -84,6 +98,8 @@ class ProcessingJob(Base, TimestampMixin):
         Index("ix_processing_jobs_status", "status", "created_at"),
         Index("ix_processing_jobs_org_status", "organization_id", "status"),
         Index("ix_processing_jobs_comparison_id", "comparison_id"),
+        Index("ix_processing_jobs_summary_id", "summary_id"),
+        Index("ix_processing_jobs_extraction_id", "extraction_id"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -115,6 +131,23 @@ class ProcessingJob(Base, TimestampMixin):
         ForeignKey("document_comparisons.id", ondelete="CASCADE"),
         nullable=True,
         comment="Set only for job_type=COMPARISON; document_version_id holds the anchor (A) version",
+    )
+    # Phase 14 — set only for job_type=SUMMARY; document_version_id holds the
+    # summarized version directly (the whole point is running against an
+    # already-READY version).
+    summary_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_summaries.id", ondelete="CASCADE"),
+        nullable=True,
+        comment="Set only for job_type=SUMMARY; document_version_id holds the summarized version",
+    )
+    # Phase 14 — set only for job_type=STRUCTURED_EXTRACTION (distinct from
+    # the Phase 5 EXTRACTION ingestion stage).
+    extraction_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("document_extractions.id", ondelete="CASCADE"),
+        nullable=True,
+        comment="Set only for job_type=STRUCTURED_EXTRACTION; document_version_id holds the extracted version",
     )
     job_type: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[str] = mapped_column(
@@ -157,6 +190,16 @@ class ProcessingJob(Base, TimestampMixin):
     comparison: Mapped[Optional[DocumentComparison]] = relationship(
         "DocumentComparison",
         foreign_keys=[comparison_id],
+        lazy="noload",
+    )
+    summary: Mapped[Optional[DocumentSummary]] = relationship(
+        "DocumentSummary",
+        foreign_keys=[summary_id],
+        lazy="noload",
+    )
+    extraction: Mapped[Optional[DocumentExtraction]] = relationship(
+        "DocumentExtraction",
+        foreign_keys=[extraction_id],
         lazy="noload",
     )
 

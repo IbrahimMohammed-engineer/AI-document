@@ -244,6 +244,23 @@ async def handle_chunking(
     except ChunkingError as exc:
         raise DeterministicJobError(exc.message, code=exc.code) from exc
 
+    # ── Phase 14: summary staleness invalidation hook (plan §4.6) ──────────
+    # The ONLY path that re-persists chunks for a version that may already
+    # have a summary is a chunking retry.  Defensive, single-statement
+    # UPDATE — a no-op when no summary row exists.  Never fails chunking.
+    try:
+        from app.repositories.document_summary_repository import (
+            DocumentSummaryRepository,
+        )
+
+        await DocumentSummaryRepository(session).mark_stale(version.id)
+        await session.commit()
+    except Exception:  # noqa: BLE001 — staleness is best-effort bookkeeping
+        logger.exception(
+            "Failed to mark summaries stale for version %s — continuing", version.id
+        )
+        await session.rollback()
+
     # ── Phase 7: chain the EMBEDDING stage ────────────────────────────────
     # Create the PENDING job row first (durable), then enqueue the Redis
     # pointer — same pattern as the EXTRACTION → CHUNKING chain (Backend §50).
@@ -412,10 +429,13 @@ async def handle_indexing(
 
 
 # Handler registry — later phases add real stage handlers here.
-# NOTE: handle_comparison / the CONFLICT_SCAN handler are NOT in this dict —
-# those job types are dispatched directly in run_processing_job before the
-# HANDLERS.get() lookup because their signatures differ (comparison takes a
-# DocumentComparison; the org-wide scan takes no version/document at all).
+# NOTE: handle_comparison / the CONFLICT_SCAN handler / _run_summary_job /
+# _run_extraction_job are NOT in this dict — those job types are dispatched
+# directly in run_processing_job before the HANDLERS.get() lookup because
+# their signatures differ (comparison/summary/extraction take their domain
+# row; the org-wide scan takes no version/document at all) AND because their
+# whole purpose is to run against an ALREADY-READY version — the pipeline
+# path's READY-short-circuit would silently no-op them (plan §2.3/§5.4).
 HANDLERS: dict[JobType, JobHandler] = {
     JobType.EXTRACTION: handle_extraction,
     JobType.CHUNKING: handle_chunking,
@@ -551,6 +571,252 @@ async def _run_comparison_job(
         job.id, comparison.id,
     )
     return JobStatus.COMPLETED.value
+
+
+# ── SUMMARY stage handler (Phase 14 — summary pipeline) ───────────────────────
+
+async def _run_summary_job(
+    ctx: dict[str, Any],
+    job: ProcessingJob,
+    session: AsyncSession,
+) -> str:
+    """Entry point for SUMMARY jobs — called directly from run_processing_job.
+
+    Mirrors _run_comparison_job exactly in shape: loads the DocumentSummary
+    by job.summary_id, validates tenancy, transitions the row to PROCESSING,
+    calls the thin service handler, marks COMPLETED/FAILED on the DOMAIN ROW
+    (never document_versions.status).  The pipeline runs against an
+    already-READY version — the generic path's READY-short-circuit would
+    silently no-op it (plan §2.3).
+    """
+    from app.models.summary import DocumentSummary
+    from app.repositories.document_summary_repository import DocumentSummaryRepository
+    from app.services.summary_service import SummaryService
+    from sqlalchemy import select
+
+    job_repo = ProcessingJobRepository(session)
+    summary_repo = DocumentSummaryRepository(session)
+
+    # Load the summary record
+    summary_result = await session.execute(
+        select(DocumentSummary).where(DocumentSummary.id == job.summary_id)
+    )
+    summary = summary_result.scalar_one_or_none()
+    summary_id_str = summary.id if summary is not None else None
+    if summary is None:
+        async with _atomic(session):
+            await job_repo.mark_failed(
+                job,
+                error_message=f"DocumentSummary {job.summary_id} not found.",
+                now=utc_now(),
+            )
+        return JobStatus.FAILED.value
+
+    # Tenancy check
+    if summary.organization_id != job.organization_id:
+        logger.error(
+            "TENANCY MISMATCH on summary job %s: payload org=%s, summary org=%s",
+            job.id, job.organization_id, summary.organization_id,
+        )
+        async with _atomic(session):
+            await job_repo.mark_failed(
+                job,
+                error_message="Summary job payload failed tenant validation.",
+                now=utc_now(),
+            )
+        return JobStatus.FAILED.value
+
+    # Capture plain retry-budget values BEFORE the pipeline runs (the failed
+    # pipeline's rollback expires the ORM instances — same rationale as the
+    # comparison job's comment).
+    job_id_str = job.id
+    attempts = job.attempts
+    max_attempts = job.max_attempts
+
+    try:
+        await SummaryService.run(job, summary, session)
+    except DeterministicJobError as exc:
+        await _fail_special_job(
+            session, job_repo, summary_repo, "summary",
+            job_id_str, summary_id_str, exc.message,
+        )
+        return JobStatus.FAILED.value
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "Summary job %s failed (attempt %s/%s): %s",
+            job_id_str, attempts, max_attempts, message,
+        )
+        if attempts < max_attempts:
+            delay = get_backoff_seconds(attempts)
+            fresh_job = await job_repo.get_by_id(job_id_str)
+            fresh_summary = await summary_repo.get_by_id(summary_id_str or "")
+            if fresh_job is None or fresh_summary is None:
+                logger.error(
+                    "Summary job %s vanished mid-retry — aborting", job_id_str
+                )
+                return JobStatus.FAILED.value
+            async with _atomic(session):
+                await ProcessingJobRepository(session).mark_retrying(
+                    fresh_job, error_message=message, now=utc_now()
+                )
+                await summary_repo.update_status(fresh_summary, "PENDING")
+            try:
+                await enqueue_processing_job(job_id_str, delay_seconds=delay)
+            except Exception:
+                logger.exception(
+                    "Re-enqueue failed for RETRYING summary job %s — sweep will recover",
+                    job_id_str,
+                )
+            return JobStatus.RETRYING.value
+        # Retries exhausted
+        await _fail_special_job(
+            session, job_repo, summary_repo, "summary",
+            job_id_str, summary_id_str,
+            f"Retries exhausted. Last error: {message}",
+        )
+        return JobStatus.FAILED.value
+
+    # Success
+    async with _atomic(session):
+        await job_repo.mark_completed(job, now=utc_now())
+    logger.info("Summary job %s COMPLETED: summary=%s", job.id, summary.id)
+    return JobStatus.COMPLETED.value
+
+
+# ── STRUCTURED_EXTRACTION stage handler (Phase 14 — extraction pipeline) ──────
+
+async def _run_extraction_job(
+    ctx: dict[str, Any],
+    job: ProcessingJob,
+    session: AsyncSession,
+) -> str:
+    """Entry point for STRUCTURED_EXTRACTION jobs — mirrors _run_summary_job.
+
+    Deliberately a DIFFERENT job type from the Phase 5 EXTRACTION ingestion
+    stage (plan §2.4's name-collision correction).
+    """
+    from app.models.extraction import DocumentExtraction
+    from app.repositories.document_extraction_repository import (
+        DocumentExtractionRepository,
+    )
+    from app.services.extraction_service import ExtractionService
+    from sqlalchemy import select
+
+    job_repo = ProcessingJobRepository(session)
+    extraction_repo = DocumentExtractionRepository(session)
+
+    extraction_result = await session.execute(
+        select(DocumentExtraction).where(DocumentExtraction.id == job.extraction_id)
+    )
+    extraction = extraction_result.scalar_one_or_none()
+    extraction_id_str = extraction.id if extraction is not None else None
+    if extraction is None:
+        async with _atomic(session):
+            await job_repo.mark_failed(
+                job,
+                error_message=f"DocumentExtraction {job.extraction_id} not found.",
+                now=utc_now(),
+            )
+        return JobStatus.FAILED.value
+
+    if extraction.organization_id != job.organization_id:
+        logger.error(
+            "TENANCY MISMATCH on extraction job %s: payload org=%s, extraction org=%s",
+            job.id, job.organization_id, extraction.organization_id,
+        )
+        async with _atomic(session):
+            await job_repo.mark_failed(
+                job,
+                error_message="Extraction job payload failed tenant validation.",
+                now=utc_now(),
+            )
+        return JobStatus.FAILED.value
+
+    job_id_str = job.id
+    attempts = job.attempts
+    max_attempts = job.max_attempts
+
+    try:
+        await ExtractionService.run(job, extraction, session)
+    except DeterministicJobError as exc:
+        await _fail_special_job(
+            session, job_repo, extraction_repo, "extraction",
+            job_id_str, extraction_id_str, exc.message,
+        )
+        return JobStatus.FAILED.value
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "Extraction job %s failed (attempt %s/%s): %s",
+            job_id_str, attempts, max_attempts, message,
+        )
+        if attempts < max_attempts:
+            delay = get_backoff_seconds(attempts)
+            fresh_job = await job_repo.get_by_id(job_id_str)
+            fresh_run = await extraction_repo.get_by_id(extraction_id_str or "")
+            if fresh_job is None or fresh_run is None:
+                logger.error(
+                    "Extraction job %s vanished mid-retry — aborting", job_id_str
+                )
+                return JobStatus.FAILED.value
+            async with _atomic(session):
+                await ProcessingJobRepository(session).mark_retrying(
+                    fresh_job, error_message=message, now=utc_now()
+                )
+                await extraction_repo.update_status(fresh_run, "PENDING")
+            try:
+                await enqueue_processing_job(job_id_str, delay_seconds=delay)
+            except Exception:
+                logger.exception(
+                    "Re-enqueue failed for RETRYING extraction job %s — sweep will recover",
+                    job_id_str,
+                )
+            return JobStatus.RETRYING.value
+        await _fail_special_job(
+            session, job_repo, extraction_repo, "extraction",
+            job_id_str, extraction_id_str,
+            f"Retries exhausted. Last error: {message}",
+        )
+        return JobStatus.FAILED.value
+
+    async with _atomic(session):
+        await job_repo.mark_completed(job, now=utc_now())
+    logger.info("Extraction job %s COMPLETED: run=%s", job.id, extraction.id)
+    return JobStatus.COMPLETED.value
+
+
+async def _fail_special_job(
+    session: AsyncSession,
+    job_repo: ProcessingJobRepository,
+    domain_repo: Any,
+    domain_name: str,
+    job_id: str,
+    domain_id: str | None,
+    message: str,
+) -> None:
+    """Terminal FAILED for a special-dispatch job + its domain row + dead-letter.
+
+    Shared by the summary/extraction paths — reloads both rows fresh (the
+    failed pipeline's rollback may have expired the ORM instances), mirrors
+    the comparison path's exhaustion block.
+    """
+    fresh_job = await job_repo.get_by_id(job_id)
+    fresh_domain = await domain_repo.get_by_id(domain_id or "") if domain_id else None
+    if fresh_job is None or fresh_domain is None:
+        logger.error(
+            "%s job %s vanished at retry exhaustion — aborting",
+            domain_name, job_id,
+        )
+        return
+    async with _atomic(session):
+        await ProcessingJobRepository(session).mark_failed(
+            fresh_job, error_message=message, now=utc_now()
+        )
+        await domain_repo.update_status(
+            fresh_domain, "FAILED", error_message=message
+        )
+    await _dead_letter(fresh_job, message)
 
 
 async def handle_comparison(
@@ -1114,6 +1380,16 @@ async def run_processing_job(ctx: dict[str, Any], job_id: str) -> str:
         # ── Dispatch: CONFLICT_SCAN jobs are org-wide (no version anchor) ─────
         if JobType(job.job_type) is JobType.CONFLICT_SCAN:
             return await _run_conflict_scan_job(ctx, job, session)
+
+        # ── Dispatch: Phase 14 SUMMARY / STRUCTURED_EXTRACTION (special path) ──
+        # CRITICAL (plan §2.3/§5.4): these must return BEFORE the version-
+        # status logic below — their whole purpose is to run against an
+        # already-READY version, which the per-version pipeline path
+        # short-circuits to a silent moot success.
+        if JobType(job.job_type) is JobType.SUMMARY:
+            return await _run_summary_job(ctx, job, session)
+        if JobType(job.job_type) is JobType.STRUCTURED_EXTRACTION:
+            return await _run_extraction_job(ctx, job, session)
 
         # ── Load referenced entity FRESH + validate tenancy ───────────────
         ver_repo = DocumentVersionRepository(session)

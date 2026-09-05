@@ -359,6 +359,35 @@ class Settings(BaseSettings):
     # finished (or never started) — no manual cleanup, no unbounded growth.
     chat_stop_flag_ttl_seconds: int = 300
 
+    # ─── Document summaries + structured extraction (Phase 14) ────────────────
+    # Larger single-shot budget than chat's context_token_budget (5000) — a
+    # summary reads much more of the document at once, and these are
+    # one-shot background calls, not latency-sensitive streamed interactions.
+    summary_context_token_budget: int = Field(
+        default=12000,
+        description="Token budget for the summary generation SOURCE context",
+    )
+    # Chunks sampled per top-level section when long-document sampling
+    # triggers (the section-diverse strategy, plan §5.6).
+    summary_sampling_chunks_per_section: int = Field(
+        default=1,
+        description="Chunks sampled per top-level section for long-document summaries",
+    )
+    extraction_context_token_budget: int = Field(
+        default=6000,
+        description="Token budget for the structured-extraction SOURCE context",
+    )
+    extraction_top_k_per_category: int = Field(
+        default=8,
+        description="Semantic-search candidates retrieved per extraction category",
+    )
+    # Defensive cap on LLM output size per category — mirrors
+    # query_analyzer's scope_hints[:10] bounding pattern for untrusted output.
+    extraction_max_items_per_category: int = Field(
+        default=20,
+        description="Maximum extracted items persisted per category (defensive cap)",
+    )
+
     # ─── CORS ─────────────────────────────────────────────────────────────────
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 

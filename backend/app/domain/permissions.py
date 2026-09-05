@@ -20,6 +20,8 @@ class PermissionKey(StrEnum):
     CHAT_CREATE = "chat:create"
     COMPARISON_CREATE = "comparison:create"
     CONFLICT_RESOLVE = "conflict:resolve"
+    SUMMARY_REGENERATE = "summary:regenerate"
+    EXTRACTION_CREATE = "extraction:create"
     USER_MANAGE = "user:manage"
     SETTINGS_MANAGE = "settings:manage"
     ANALYTICS_READ = "analytics:read"

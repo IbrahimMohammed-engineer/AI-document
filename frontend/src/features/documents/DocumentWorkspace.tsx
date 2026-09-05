@@ -23,7 +23,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import {
   ProcessingStatusBadge,
@@ -48,6 +48,7 @@ function formatBytes(bytes: number): string {
 export function DocumentWorkspace() {
   const { id } = useParams<{ id: string }>()
   const documentId = id ?? null
+  const navigate = useNavigate()
   const [searchParams] = useSearchParams()
 
   // Citation deep-link (FE §12): ?page=N&q=<quoted span> — the cited page
@@ -115,6 +116,25 @@ export function DocumentWorkspace() {
             documentId={document.id}
           />
         )}
+      </div>
+
+      {/* Phase 14 — action bar (FE §6.5): Summary is primary; Extractions
+          (a less-frequent, more specialized action) is a secondary entry so
+          the primary bar stays uncluttered. */}
+      <div className="workspace-actions">
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          onClick={() => navigate(`/app/documents/${document.id}/summary`)}
+        >
+          Summary
+        </button>
+        <Link
+          to={`/app/documents/${document.id}/extractions`}
+          className="btn btn-secondary btn-sm"
+        >
+          Extractions
+        </Link>
       </div>
 
       <section className="card workspace-processing">

@@ -1,0 +1,139 @@
+/**
+ * Summary screen styles (Phase 14, FE §6.12 layout vocabulary).
+ */
+
+.summary-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.summary-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* Regenerating: content stays visible, dimmed — never blank (plan §6.8). */
+.summary-body--dimmed {
+  opacity: 0.55;
+  transition: opacity 0.2s ease;
+}
+
+.summary-section {
+  background: var(--color-neutral-50, #fafafa);
+  border: 1px solid var(--color-neutral-200, #e5e5e5);
+  border-radius: var(--radius-md, 8px);
+  padding: 1rem 1.25rem;
+}
+
+.summary-section-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-neutral-700, #404040);
+}
+
+.summary-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.summary-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem;
+  font-size: 0.925rem;
+  color: var(--color-neutral-800, #262626);
+}
+
+.summary-empty {
+  margin: 0;
+  font-size: 0.875rem;
+  font-style: italic;
+  color: var(--color-neutral-500, #737373);
+}
+
+/* Two-column Dates/Roles + Requirements/Risks (FE §6.12). */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.25rem;
+}
+
+.summary-topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.summary-topic-tag {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: hsl(210, 40%, 95%);
+  border: 1px solid hsl(210, 30%, 85%);
+  font-size: 0.8rem;
+  color: var(--color-neutral-700, #404040);
+}
+
+/* Banners */
+.summary-sampling-banner,
+.summary-stale-banner,
+.summary-regen-banner {
+  padding: 0.6rem 0.9rem;
+  border-radius: var(--radius-md, 8px);
+  font-size: 0.85rem;
+}
+
+.summary-sampling-banner {
+  background: hsl(210, 60%, 96%);
+  border: 1px solid hsl(210, 40%, 85%);
+  color: hsl(210, 40%, 30%);
+}
+
+.summary-stale-banner {
+  background: hsl(45, 80%, 95%);
+  border: 1px solid hsl(45, 60%, 82%);
+  color: hsl(45, 55%, 30%);
+}
+
+.summary-regen-banner {
+  background: hsl(152, 40%, 95%);
+  border: 1px solid hsl(152, 35%, 82%);
+  color: hsl(152, 35%, 25%);
+}
+
+/* Loading skeletons (FE §6.12: skeleton blocks, not one spinner). */
+.summary-skeleton .summary-skeleton-line {
+  height: 0.85rem;
+  margin: 0.5rem 0;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--color-neutral-200, #e5e5e5) 25%,
+    var(--color-neutral-100, #f5f5f5) 50%,
+    var(--color-neutral-200, #e5e5e5) 75%
+  );
+  background-size: 200% 100%;
+  animation: summary-shimmer 1.4s ease infinite;
+}
+
+.summary-skeleton-line--head {
+  width: 40%;
+  height: 1rem;
+}
+
+.summary-skeleton-line--short {
+  width: 70%;
+}
+
+@keyframes summary-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

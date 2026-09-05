@@ -61,12 +61,12 @@ VALID_INTENTS: tuple[str, ...] = (
     "SUMMARY", "CONFLICT_DETECTION", "EXTRACTION",
 )
 
-# Phases 12–13: COMPARISON, CHANGE_DETECTION (Phase 12) and
-# CONFLICT_DETECTION (Phase 13) are now implemented; they are removed from
-# DEFERRED_INTENTS so analyze_query does not log a warning for them.
-DEFERRED_INTENTS: frozenset[str] = frozenset(
-    {"SUMMARY", "EXTRACTION"}
-)
+# Phases 12–14: COMPARISON, CHANGE_DETECTION (Phase 12), CONFLICT_DETECTION
+# (Phase 13), and SUMMARY, EXTRACTION (Phase 14) are now all implemented —
+# DEFERRED_INTENTS is empty (the is_deferred_intent branch below is dead but
+# harmless; kept as a documented no-op so the analyzer's classification
+# contract is unchanged).
+DEFERRED_INTENTS: frozenset[str] = frozenset()
 
 _FAST_TIMEOUT_SECONDS = 5.0  # Backend §51 — fast classification calls
 

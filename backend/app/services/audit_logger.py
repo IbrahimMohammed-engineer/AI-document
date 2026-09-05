@@ -55,6 +55,12 @@ class AuditAction:
     # statement text (same small/non-sensitive metadata convention).
     CONFLICT_RESOLVED = "CONFLICT_RESOLVED"
 
+    # ── Summary/extraction events (Phase 14) ──────────────────────────────────
+    # Metadata carries only version/job ids — never prompt payloads or
+    # summary/extraction content (same small/non-sensitive convention).
+    SUMMARY_REGENERATED = "SUMMARY_REGENERATED"
+    EXTRACTION_RUN_CREATED = "EXTRACTION_RUN_CREATED"
+
 
 class AuditLogger:
     @staticmethod

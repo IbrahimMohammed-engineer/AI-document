@@ -104,6 +104,49 @@ class JobService:
         )
 
     @staticmethod
+    async def create_for_summary(
+        db: AsyncSession,
+        *,
+        organization_id: str,
+        document_version_id: str,
+        summary_id: str,
+    ) -> ProcessingJob:
+        """Insert a PENDING SUMMARY job row inside the CALLER's transaction.
+
+        Phase 14: mirrors ``create_for_comparison`` — the job runs against an
+        already-READY version (document_version_id carries the summarized
+        version directly; summary_id pairs the domain row, §5.4).
+        """
+        repo = ProcessingJobRepository(db)
+        return await repo.create_for_summary(
+            organization_id=organization_id,
+            document_version_id=document_version_id,
+            summary_id=summary_id,
+            max_attempts=get_max_attempts(JobType.SUMMARY),
+        )
+
+    @staticmethod
+    async def create_for_extraction(
+        db: AsyncSession,
+        *,
+        organization_id: str,
+        document_version_id: str,
+        extraction_id: str,
+    ) -> ProcessingJob:
+        """Insert a PENDING STRUCTURED_EXTRACTION job row inside the CALLER's tx.
+
+        Phase 14: the new job type is distinct from the Phase 5 EXTRACTION
+        ingestion stage (§2.4's name-collision correction).
+        """
+        repo = ProcessingJobRepository(db)
+        return await repo.create_for_extraction(
+            organization_id=organization_id,
+            document_version_id=document_version_id,
+            extraction_id=extraction_id,
+            max_attempts=get_max_attempts(JobType.STRUCTURED_EXTRACTION),
+        )
+
+    @staticmethod
     async def create_for_org_scan(
         db: AsyncSession,
         *,

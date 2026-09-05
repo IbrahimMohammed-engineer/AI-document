@@ -32,6 +32,12 @@ from app.models.document import (  # noqa: F401
 )
 from app.models.processing_job import ProcessingJob  # noqa: F401
 from app.models.comparison import ComparisonChange, DocumentComparison  # noqa: F401
+from app.models.conflict import Conflict, ConflictStatement  # noqa: F401
+from app.models.summary import DocumentSummary  # noqa: F401
+from app.models.extraction import (  # noqa: F401
+    DocumentExtraction,
+    DocumentExtractionItem,
+)
 from app.models.conversation import (  # noqa: F401
     Conversation,
     ConversationDocument,
@@ -62,6 +68,11 @@ __all__ = [
     "ProcessingJob",
     "ComparisonChange",
     "DocumentComparison",
+    "Conflict",
+    "ConflictStatement",
+    "DocumentSummary",
+    "DocumentExtraction",
+    "DocumentExtractionItem",
     "Conversation",
     "ConversationDocument",
     "MessageFeedback",

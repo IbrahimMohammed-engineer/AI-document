@@ -82,6 +82,57 @@ class ProcessingJobRepository(TenantScopedRepository[ProcessingJob]):
         )
         return await self.add(job)
 
+    async def create_for_summary(
+        self,
+        *,
+        organization_id: str,
+        document_version_id: str,
+        summary_id: str,
+        max_attempts: int = 3,
+    ) -> ProcessingJob:
+        """Insert a PENDING SUMMARY job row and flush (does NOT commit).
+
+        Phase 14: mirrors ``create_for_comparison`` exactly — sets both
+        ``document_version_id`` (the summarized version) and ``summary_id``
+        so the pairing CHECK is satisfied:
+        ``(job_type = 'SUMMARY') = (summary_id IS NOT NULL)``.
+        """
+        job = ProcessingJob(
+            organization_id=organization_id,
+            document_version_id=document_version_id,
+            summary_id=summary_id,
+            job_type="SUMMARY",
+            status=JobStatus.PENDING.value,
+            attempts=0,
+            max_attempts=max_attempts,
+        )
+        return await self.add(job)
+
+    async def create_for_extraction(
+        self,
+        *,
+        organization_id: str,
+        document_version_id: str,
+        extraction_id: str,
+        max_attempts: int = 3,
+    ) -> ProcessingJob:
+        """Insert a PENDING STRUCTURED_EXTRACTION job row and flush (no commit).
+
+        Phase 14: distinct from the Phase 5 EXTRACTION ingestion stage —
+        pairs ``extraction_id`` with the new job type so
+        ``(job_type = 'STRUCTURED_EXTRACTION') = (extraction_id IS NOT NULL)``.
+        """
+        job = ProcessingJob(
+            organization_id=organization_id,
+            document_version_id=document_version_id,
+            extraction_id=extraction_id,
+            job_type="STRUCTURED_EXTRACTION",
+            status=JobStatus.PENDING.value,
+            attempts=0,
+            max_attempts=max_attempts,
+        )
+        return await self.add(job)
+
     async def create_for_org_scan(
         self,
         *,

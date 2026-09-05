@@ -43,6 +43,10 @@ class JobType(str, Enum):
     COMPARISON = "COMPARISON"      # Phase 12
     SUMMARY = "SUMMARY"            # Phase 14
     CONFLICT_SCAN = "CONFLICT_SCAN"  # Phase 13
+    # Phase 14 — structured-information extraction.  Deliberately distinct
+    # from EXTRACTION (the Phase 5 ingestion text-extraction pipeline stage)
+    # — two unrelated concepts that happen to share a root word.
+    STRUCTURED_EXTRACTION = "STRUCTURED_EXTRACTION"  # Phase 14
     PURGE = "PURGE"                # Phase 16/20 retention maintenance
 
 
@@ -196,6 +200,7 @@ _JOB_RETRY_POLICY: dict[JobType, int] = {
     JobType.COMPARISON: 3,   # may call LLM providers (Phase 12)
     JobType.SUMMARY: 3,      # may call LLM providers (Phase 14)
     JobType.CONFLICT_SCAN: 2,
+    JobType.STRUCTURED_EXTRACTION: 3,  # may call LLM providers (Phase 14)
     JobType.PURGE: 3,        # touches object storage / DB teardown
 }
 

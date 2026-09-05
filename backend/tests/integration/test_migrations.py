@@ -749,3 +749,276 @@ async def test_migration_013_downgrade_upgrade_cycle(async_database_url, run_mig
     assert {"conflicts", "conflict_statements"} <= tables, (
         "conflict tables must exist again after the downgrade/upgrade cycle"
     )
+
+
+# ── Phase 14 — summaries + extractions (migration 014, plan §4) ───────────────
+
+@pytest.mark.integration
+async def test_summary_extraction_tables_and_constraints(
+    async_database_url, run_migrations
+):
+    """Migration 014 must create document_summaries / document_extractions /
+    document_extraction_items per plan §4 with the status/schema/category
+    CHECK constraints, the one-row-per-version summary UNIQUE, the item
+    run/category/index UNIQUE, the RESTRICT provenance FK policy on items,
+    the CASCADE run FK on items, and the new pairing CHECKs + widened
+    job_type CHECK on processing_jobs."""
+    engine = create_async_engine(async_database_url, echo=False)
+    async with engine.connect() as conn:
+        tables = {
+            row[0]
+            for row in (
+                await conn.execute(sa.text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public'"
+                ))
+            ).fetchall()
+        }
+        assert {
+            "document_summaries",
+            "document_extractions",
+            "document_extraction_items",
+        } <= tables
+
+        constraints = {
+            row[0]
+            for row in (
+                await conn.execute(sa.text(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conrelid IN ("
+                    "'document_summaries'::regclass, "
+                    "'document_extractions'::regclass, "
+                    "'document_extraction_items'::regclass, "
+                    "'processing_jobs'::regclass)"
+                ))
+            ).fetchall()
+        }
+        assert {
+            "ck_document_summaries_status",
+            "uq_document_summaries_version",
+            "ck_document_extractions_status",
+            "ck_document_extractions_schema_key",
+            "ck_document_extraction_items_category",
+            "ck_document_extraction_items_page_number",
+            "uq_document_extraction_items_run_category_index",
+            "ck_processing_jobs_summary_pairing",
+            "ck_processing_jobs_extraction_pairing",
+        } <= constraints
+
+        # The widened job_type CHECK must accept STRUCTURED_EXTRACTION while
+        # keeping the pre-existing values (plan §2.4's distinct-name rule).
+        definition = (await conn.execute(sa.text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_processing_jobs_job_type'"
+        ))).scalar_one()
+        assert "STRUCTURED_EXTRACTION" in definition
+        assert "SUMMARY" in definition
+        assert "CONFLICT_SCAN" in definition
+
+        # Item FK policy: extraction_id CASCADE (items die with their run);
+        # every provenance chain RESTRICT (citation-grade, plan §4.4).
+        fks = {
+            row[0]: row[1]
+            for row in (
+                await conn.execute(sa.text(
+                    """
+                    SELECT tc.constraint_name, rc.delete_rule
+                    FROM information_schema.referential_constraints rc
+                    JOIN information_schema.table_constraints tc
+                      ON tc.constraint_name = rc.constraint_name
+                     AND tc.table_name = 'document_extraction_items'
+                    """
+                ))
+            ).fetchall()
+        }
+        for name, rule in fks.items():
+            expected = (
+                "CASCADE"
+                if name == "document_extraction_items_extraction_id_fkey"
+                else "RESTRICT"
+            )
+            assert rule == expected, (
+                f"{name} delete rule must be {expected}, got {rule}"
+            )
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+async def test_phase14_permissions_seeded(async_database_url, run_migrations):
+    """summary:regenerate + extraction:create seeded to Admin/Editor, never
+    Viewer (mirrors the conflict:resolve assertions)."""
+    engine = create_async_engine(async_database_url, echo=False)
+    async with engine.connect() as conn:
+        for key in ("summary:regenerate", "extraction:create"):
+            grants = {
+                row[0]
+                for row in (
+                    await conn.execute(sa.text(
+                        "SELECT r.name FROM role_permissions rp "
+                        "JOIN permissions p ON p.id = rp.permission_id "
+                        "JOIN roles r ON r.id = rp.role_id "
+                        "WHERE p.key = :key AND r.is_system = true"
+                    ), {"key": key})
+                ).fetchall()
+            }
+            assert grants == {"Admin", "Editor"}, (
+                f"{key} must be granted to Admin+Editor only, got {grants}"
+            )
+    await engine.dispose()
+
+
+@pytest.mark.integration
+async def test_phase14_check_constraints_enforced(async_database_url, run_migrations):
+    """Functional CHECK verification for migration 014: invalid status /
+    schema_key / category values are rejected; two summaries for one version
+    violate the UNIQUE; a SUMMARY job without summary_id violates the pairing
+    CHECK.  All inside a transaction that is rolled back."""
+    engine = create_async_engine(async_database_url, echo=False)
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("SAVEPOINT seed"))
+        try:
+            org_id = str((await conn.execute(sa.text(
+                "INSERT INTO organizations (id, name, slug) "
+                "VALUES (gen_random_uuid(), 'mig14-org', 'mig14-org') RETURNING id"
+            ))).scalar_one())
+            user_id = str((await conn.execute(sa.text(
+                "INSERT INTO users (id, organization_id, email, full_name, password_hash) "
+                "VALUES (gen_random_uuid(), :org, 'mig14@x.test', 'Mig', 'x') RETURNING id"
+            ), {"org": org_id})).scalar_one())
+            doc_id = str((await conn.execute(sa.text(
+                "INSERT INTO documents (id, organization_id, owner_id, name, document_type) "
+                "VALUES (gen_random_uuid(), :org, :owner, 'Mig Doc 14', 'policy') RETURNING id"
+            ), {"org": org_id, "owner": user_id})).scalar_one())
+            ver_id = str((await conn.execute(sa.text(
+                "INSERT INTO document_versions (id, document_id, version_number, "
+                "storage_key, mime_type, file_size_bytes, status, created_by) "
+                "VALUES (gen_random_uuid(), :doc, 1, 'k', 'application/pdf', 1, "
+                "'READY', :owner) RETURNING id"
+            ), {"doc": doc_id, "owner": user_id})).scalar_one())
+
+            async def _must_raise(stmt: str, params: dict, label: str) -> None:
+                await conn.execute(sa.text("SAVEPOINT bad"))
+                raised = False
+                try:
+                    await conn.execute(sa.text(stmt), params)
+                except Exception:
+                    raised = True
+                finally:
+                    await conn.execute(sa.text("ROLLBACK TO SAVEPOINT bad"))
+                assert raised, f"{label} must be rejected"
+
+            await _must_raise(
+                "INSERT INTO document_summaries (organization_id, document_id, "
+                "document_version_id, status, requested_by) VALUES (:org, :doc, "
+                ":ver, 'FROZEN', :owner)",
+                {"org": org_id, "doc": doc_id, "ver": ver_id, "owner": user_id},
+                "invalid summary status",
+            )
+            await _must_raise(
+                "INSERT INTO document_extractions (organization_id, document_id, "
+                "document_version_id, schema_key, status, requested_by) VALUES "
+                "(:org, :doc, :ver, 'custom_x', 'PENDING', :owner)",
+                {"org": org_id, "doc": doc_id, "ver": ver_id, "owner": user_id},
+                "invalid schema_key",
+            )
+            await _must_raise(
+                "INSERT INTO document_summaries (organization_id, document_id, "
+                "document_version_id, status, requested_by) VALUES (:org, :doc, "
+                ":ver, 'PENDING', :owner)",
+                {"org": org_id, "doc": doc_id, "ver": ver_id, "owner": user_id},
+                "second summary for the same version (UNIQUE)",
+            )
+
+            run_id = str((await conn.execute(sa.text(
+                "INSERT INTO document_extractions (organization_id, document_id, "
+                "document_version_id, schema_key, status, requested_by) "
+                "VALUES (:org, :doc, :ver, 'standard_v1', 'PENDING', :owner) "
+                "RETURNING id"
+            ), {"org": org_id, "doc": doc_id, "ver": ver_id,
+                "owner": user_id})).scalar_one())
+
+            await _must_raise(
+                "INSERT INTO document_extraction_items (extraction_id, category, "
+                "item_index, label, document_id, document_version_id, chunk_id, "
+                "page_id, page_number, quoted_text) "
+                "SELECT :run, 'vehicle', 0, 'l', d.id, dv.id, "
+                "gen_random_uuid(), gen_random_uuid(), 0, 'q' "
+                "FROM documents d, document_versions dv "
+                "WHERE d.id = :doc AND dv.id = :ver",
+                {"run": run_id, "doc": doc_id, "ver": ver_id},
+                "invalid item category",
+            )
+
+            # Pairing CHECKs
+            await _must_raise(
+                "INSERT INTO processing_jobs (id, organization_id, "
+                "document_version_id, job_type) VALUES "
+                "(gen_random_uuid(), :org, :ver, 'SUMMARY')",
+                {"org": org_id, "ver": ver_id},
+                "SUMMARY job without summary_id",
+            )
+            await _must_raise(
+                "INSERT INTO processing_jobs (id, organization_id, "
+                "document_version_id, job_type, extraction_id) VALUES "
+                "(gen_random_uuid(), :org, :ver, 'COMPARISON', :run)",
+                {"org": org_id, "ver": ver_id, "run": run_id},
+                "non-STRUCTURED_EXTRACTION job with extraction_id",
+            )
+            await conn.execute(sa.text(
+                "INSERT INTO processing_jobs (id, organization_id, "
+                "document_version_id, job_type, extraction_id) VALUES "
+                "(gen_random_uuid(), :org, :ver, 'STRUCTURED_EXTRACTION', :run)"
+            ), {"org": org_id, "ver": ver_id, "run": run_id})
+        finally:
+            await conn.execute(sa.text("ROLLBACK TO SAVEPOINT seed"))
+    await engine.dispose()
+
+
+@pytest.mark.integration
+async def test_migration_014_downgrade_upgrade_cycle(async_database_url, run_migrations):
+    """downgrade -1 (drop 014) then upgrade head runs clean (plan §14)."""
+    import os
+    import subprocess
+    import sys
+
+    cwd = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sync_url = async_database_url.replace("+asyncpg", "+psycopg2")
+
+    def _alembic(*args: str):
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            env={**os.environ, "MIGRATION_DATABASE_URL": sync_url},
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+
+    down = _alembic("downgrade", "-1")
+    assert down.returncode == 0, (
+        f"alembic downgrade -1 failed:\n{down.stdout}\n{down.stderr}"
+    )
+    up = _alembic("upgrade", "head")
+    assert up.returncode == 0, (
+        f"alembic upgrade head failed:\n{up.stdout}\n{down.stderr}"
+    )
+
+    engine = create_async_engine(async_database_url, echo=False)
+    async with engine.connect() as conn:
+        tables = {
+            row[0]
+            for row in (
+                await conn.execute(sa.text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public'"
+                ))
+            ).fetchall()
+        }
+    await engine.dispose()
+    assert {
+        "document_summaries",
+        "document_extractions",
+        "document_extraction_items",
+    } <= tables, (
+        "Phase 14 tables must exist again after the downgrade/upgrade cycle"
+    )

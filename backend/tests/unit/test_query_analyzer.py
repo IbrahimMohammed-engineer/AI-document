@@ -62,11 +62,21 @@ class TestParseAnalyzerOutput:
             assert parse_analyzer_output(f'{{"intent": "{intent}"}}').intent == intent
 
     def test_only_phase14_intents_remain_deferred(self):
-        assert parse_analyzer_output('{"intent": "summary"}').is_deferred_intent
-        assert parse_analyzer_output('{"intent": "extraction"}').is_deferred_intent
-        # Phase 13: CONFLICT_DETECTION now routes to ConflictService
+        # Phase 14: ALL six intents now route to real services —
+        # DEFERRED_INTENTS is empty (plan §5.12/§8.1).
+        assert parse_analyzer_output('{"intent": "summary"}').intent == "SUMMARY"
+        assert parse_analyzer_output('{"intent": "extraction"}').intent == "EXTRACTION"
         assert not parse_analyzer_output('{"intent": "conflict_detection"}').is_deferred_intent
         assert not parse_analyzer_output('{"intent": "change_detection"}').is_deferred_intent
+        assert not parse_analyzer_output('{"intent": "summary"}').is_deferred_intent
+        assert not parse_analyzer_output('{"intent": "extraction"}').is_deferred_intent
+
+    def test_deferred_intents_empty_after_phase14(self):
+        # Plan §8.1: assert DEFERRED_INTENTS is now empty — every intent
+        # routes to its dedicated service (or standard RAG for QUESTION).
+        from app.rag.query_analyzer import DEFERRED_INTENTS
+
+        assert DEFERRED_INTENTS == frozenset()
 
     def test_invalid_json_raises(self):
         with pytest.raises(AnalyzerParseError):

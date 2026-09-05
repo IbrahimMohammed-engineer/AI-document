@@ -232,6 +232,18 @@ def create_app() -> FastAPI:
     from app.api.conflicts import router as conflicts_router
     app.include_router(conflicts_router)
 
+    # Phase 14 — Document Summaries + Structured Extraction + minimal Analytics
+    from app.api.summaries import router as summaries_router
+    app.include_router(summaries_router)
+
+    from app.api.extractions import documents_router as extraction_documents_router
+    from app.api.extractions import router as extractions_router
+    app.include_router(extractions_router)
+    app.include_router(extraction_documents_router)
+
+    from app.api.analytics import router as analytics_router
+    app.include_router(analytics_router)
+
     return app
 
 

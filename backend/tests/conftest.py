@@ -240,6 +240,11 @@ _CLEANUP_TABLES = (
     "conflicts",
     "comparison_changes",
     "document_comparisons",
+    # Phase 14 rows RESTRICT-delete against chunks/pages/versions/documents,
+    # so they must be wiped before the document tables (items first).
+    "document_extraction_items",
+    "document_extractions",
+    "document_summaries",
     "document_chunks",
     "document_sections",
     "document_pages",

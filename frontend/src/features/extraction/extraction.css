@@ -1,0 +1,89 @@
+/**
+ * Extraction screen styles (Phase 14).
+ */
+
+.extraction-detail,
+.extraction-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.extraction-banner {
+  padding: 0.6rem 0.9rem;
+  border-radius: var(--radius-md, 8px);
+  font-size: 0.85rem;
+  background: hsl(210, 60%, 96%);
+  border: 1px solid hsl(210, 40%, 85%);
+  color: hsl(210, 40%, 30%);
+}
+
+.extraction-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.extraction-count {
+  margin-left: 0.5rem;
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: var(--color-neutral-500, #737373);
+}
+
+.extraction-runs-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--color-neutral-50, #fafafa);
+  border: 1px solid var(--color-neutral-200, #e5e5e5);
+  border-radius: var(--radius-md, 8px);
+  overflow: hidden;
+}
+
+.extraction-runs-table th,
+.extraction-runs-table td {
+  text-align: left;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--color-neutral-200, #e5e5e5);
+  font-size: 0.875rem;
+}
+
+.extraction-runs-table th {
+  font-weight: 600;
+  color: var(--color-neutral-600, #525252);
+  background: var(--color-neutral-100, #f5f5f5);
+}
+
+.extraction-runs-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* Status badges reuse the platform's vocabulary (ProcessingStatusBadge style). */
+.status-badge--pending {
+  background: hsl(45, 70%, 92%);
+  color: hsl(45, 50%, 30%);
+}
+
+.status-badge--processing {
+  background: hsl(210, 60%, 92%);
+  color: hsl(210, 45%, 30%);
+}
+
+.status-badge--completed {
+  background: hsl(152, 45%, 92%);
+  color: hsl(152, 40%, 25%);
+}
+
+.status-badge--failed {
+  background: hsl(0, 55%, 94%);
+  color: hsl(0, 50%, 35%);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

@@ -23,6 +23,12 @@ import { DocumentWorkspace } from '@/features/documents'
 import { ComparisonPage } from '@/features/documents'
 import { AskPage } from '@/features/ask'
 import { ConflictDetailPage, ConflictsPage } from '@/features/conflicts'
+import { SummaryPage } from '@/features/summary'
+import {
+  ExtractionDetailPage,
+  ExtractionListPage,
+} from '@/features/extraction'
+import { AnalyticsPage } from '@/features/analytics'
 import { useConflictScanStatus, useConflicts } from '@/hooks/queries/useConflicts'
 
 /** Lightweight open-conflict count for the Dashboard KPI card. */
@@ -234,7 +240,14 @@ export function App() {
         {/* Phase 13 — Conflict detection (list + review/resolution workflow) */}
         <Route path="conflicts" element={<ConflictsPage />} />
         <Route path="conflicts/:id" element={<ConflictDetailPage />} />
-        <Route path="analytics" element={<PlaceholderPage title="Analytics" description="Usage metrics, processing stats, AI quality — Phase 10" />} />
+        {/* Phase 14 — Document summary + structured extraction (FE §6.12) */}
+        <Route path="documents/:id/summary" element={<SummaryPage />} />
+        <Route path="documents/:id/extractions" element={<ExtractionListPage />} />
+        <Route
+          path="documents/:id/extractions/:extractionId"
+          element={<ExtractionDetailPage />}
+        />
+        <Route path="analytics" element={<AnalyticsPage />} />
         <Route path="settings" element={<PlaceholderPage title="Settings" description="Organization, users, roles, integrations — Phase 3+" />} />
         <Route path="settings/*" element={<PlaceholderPage title="Settings" description="Organization settings — Phase 3+" />} />
       </Route>

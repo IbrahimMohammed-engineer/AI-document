@@ -3,7 +3,8 @@ Unit tests for pure permission evaluation (app/domain/permissions.py).
 
 Covers all 3 system roles × all permission keys plus edge cases
 (no roles, multiple roles). The role→permission assignments asserted here
-mirror the seeds from migrations 002 (base keys) and 013 (conflict:resolve)
+mirror the seeds from migrations 002 (base keys), 013 (conflict:resolve),
+and 014 (summary:regenerate + extraction:create — Admin/Editor only)
 exactly.
 """
 from __future__ import annotations
@@ -21,7 +22,8 @@ from app.models.user import Permission, Role
 ALL_KEYS = [key.value for key in PermissionKey]
 
 # Mirrors migration 002 _seed_system_roles() + migration 013
-# _seed_conflict_permission() (Admin/Editor only — never Viewer)
+# _seed_conflict_permission() + migration 014 _seed_phase14_permissions()
+# (Admin/Editor only — never Viewer)
 ROLE_PERMISSIONS = {
     "Admin": {
         "document:create",
@@ -31,6 +33,8 @@ ROLE_PERMISSIONS = {
         "chat:create",
         "comparison:create",
         "conflict:resolve",
+        "summary:regenerate",
+        "extraction:create",
         "user:manage",
         "settings:manage",
         "analytics:read",
@@ -43,6 +47,8 @@ ROLE_PERMISSIONS = {
         "chat:create",
         "comparison:create",
         "conflict:resolve",
+        "summary:regenerate",
+        "extraction:create",
         "analytics:read",
     },
     "Viewer": {
@@ -65,8 +71,8 @@ def system_role(name: str) -> Role:
 # ─── PermissionKey catalog ────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_permission_key_catalog_has_ten_entries():
-    assert len(list(PermissionKey)) == 10
+def test_permission_key_catalog_has_twelve_entries():
+    assert len(list(PermissionKey)) == 12
     assert set(k.value for k in PermissionKey) == set(ALL_KEYS)
 
 
@@ -117,7 +123,7 @@ def test_viewer_denies(key: str):
 # ─── get_user_permissions ─────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_get_user_permissions_admin_returns_all_ten():
+def test_get_user_permissions_admin_returns_all_twelve():
     assert get_user_permissions([system_role("Admin")]) == set(ALL_KEYS)
 
 
