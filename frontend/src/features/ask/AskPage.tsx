@@ -51,6 +51,8 @@ interface AskTurn {
   groundedness?: 'grounded' | 'partial' | 'ungrounded'
   note?: string | null
   feedback?: -1 | 1 | null
+  /** Phase 16 — canary sentinel fired; filtered-content security notice. */
+  injectionNotice?: boolean
   /** failed turns keep the question visible with Retry (FE §6.6) */
   errorCode?: string
 }
@@ -232,6 +234,9 @@ export function AskPage() {
               citations: event.citations,
               sources: event.sources,
               feedback: null,
+              // Phase 16: server-detected injection attempt — contaminated
+              // sentence(s) were stripped before validation.
+              injectionNotice: event.injection_attempt === true,
             })
             break
           case 'error':
@@ -268,11 +273,22 @@ export function AskPage() {
             ),
           )
         } else {
-          patchAssistant(assistantId, {
-            streaming: false,
-            errorCode: (err as { code?: string }).code ?? 'UNKNOWN_ERROR',
-            note: (err as Error).message,
-          })
+          // Phase 16: AI rate limit (429, pre-stream) — friendly retry copy.
+          const httpStatus = (err as { httpStatus?: number }).httpStatus
+          const code = (err as { code?: string }).code
+          if (httpStatus === 429 || code === 'RATE_LIMIT_EXCEEDED') {
+            patchAssistant(assistantId, {
+              streaming: false,
+              errorCode: 'RATE_LIMIT_EXCEEDED',
+              note: 'Too many requests — please wait a moment and try again.',
+            })
+          } else {
+            patchAssistant(assistantId, {
+              streaming: false,
+              errorCode: code ?? 'UNKNOWN_ERROR',
+              note: (err as Error).message,
+            })
+          }
         }
       } finally {
         abortRef.current = null
@@ -517,6 +533,12 @@ export function AskPage() {
                   {turn.groundedness === 'ungrounded' && !turn.stopped && (
                     <div className="ask-ungrounded-badge" title="No supporting source found">
                       ⌀ No grounded answer found
+                    </div>
+                  )}
+                  {turn.injectionNotice && !turn.errorCode && (
+                    <div className="ask-note" role="status">
+                      🔒 Security notice: some content was filtered from this
+                      answer.
                     </div>
                   )}
                   {turn.note && (

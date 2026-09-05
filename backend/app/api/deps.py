@@ -16,10 +16,12 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
+import redis.asyncio as aioredis
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.exceptions import AuthenticationError
 from app.infrastructure.redis import get_redis
 from app.infrastructure.database import get_db_session
@@ -101,3 +103,30 @@ def require_permission(permission_key: str):
 
 def get_redis_client():
     return get_redis()
+
+
+# ─── AI endpoint rate limiting (Phase 16) ─────────────────────────────────────
+
+async def check_ai_rate_limit(
+    user: Annotated[User, Depends(get_current_user)],
+    redis: Annotated[aioredis.Redis, Depends(get_redis_client)],  # type: ignore[type-arg]
+) -> None:
+    """Per-user sliding-window rate limit for LLM-cost endpoints.
+
+    Wired as a decorator-level ``Depends`` on POST /ask, POST
+    /chat/conversations, and POST /chat/conversations/{id}/messages so the
+    429 (with Retry-After) is returned BEFORE any retrieval/generation work —
+    denial-of-wallet defense (Phase 16 plan §5). Must be re-evaluated per
+    request: never cached.
+    """
+    from app.infrastructure.rate_limiter import check_and_increment
+
+    settings = get_settings()
+    key = f"ai_rl:{user.organization_id}:{user.id}"
+    await check_and_increment(
+        redis,
+        key=key,
+        limit=settings.ai_rate_limit_requests,
+        window_seconds=settings.ai_rate_limit_window_seconds,
+        message="Too many AI requests. Please try again later.",
+    )

@@ -212,6 +212,10 @@ def create_app() -> FastAPI:
     app.include_router(documents_router)
     app.include_router(collections_router)
 
+    # Phase 16 — Document permission grants (RESTRICTED isolation matrix)
+    from app.api.permissions import router as permissions_router
+    app.include_router(permissions_router)
+
     # Phase 7/8 — Search (chunk debug tooling lives on the documents router)
     from app.api.search import router as search_router
     app.include_router(search_router)

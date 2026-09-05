@@ -220,4 +220,8 @@ class ChatDonePayload(BaseModel):
     completion_tokens: int = 0
     stripped_claims: int = 0
     entailment_checks: int = 0
+    injection_attempt: bool = Field(
+        default=False,
+        description="Phase 16: canary sentinel fired — filtered content notice for the FE.",
+    )
     latency_ms: dict[str, Any] = Field(default_factory=dict)

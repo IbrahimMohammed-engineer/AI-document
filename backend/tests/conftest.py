@@ -27,17 +27,53 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 # ─── Pytest-asyncio configuration ────────────────────────────────────────────
 pytest_plugins = ["pytest_asyncio"]
 
+
+def _generate_test_rsa_keypair() -> tuple[str, str]:
+    """Generate a throwaway RSA-2048 PEM pair for RS256 JWT tests (Phase 16).
+
+    Runs ONCE at conftest import — before any app module is imported — so
+    every Settings() instantiation in the test process sees the same keys.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("ascii")
+    public_pem = key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("ascii")
+    return private_pem, public_pem
+
+
+_JWT_PRIVATE_PEM, _JWT_PUBLIC_PEM = _generate_test_rsa_keypair()
+
 # Set before ANY test module imports app code — app.core.security reads
-# get_settings() at import time and requires a JWT secret.
+# get_settings() at import time and requires JWT configuration. Phase 16:
+# tests exercise the production RS256 path; PEMs are embedded with literal
+# \n escapes exactly as operators write them in .env (config unescapes).
 os.environ.setdefault(
     "JWT_SECRET_KEY",
     "test-secret-key-for-testing-only-not-used-in-production-must-be-long-enough",
 )
+os.environ.setdefault("JWT_ALGORITHM", "RS256")
+os.environ.setdefault("JWT_PRIVATE_KEY", _JWT_PRIVATE_PEM.replace("\n", "\\n"))
+os.environ.setdefault("JWT_PUBLIC_KEY", _JWT_PUBLIC_PEM.replace("\n", "\\n"))
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "integration: marks tests as integration tests")
     config.addinivalue_line("markers", "unit: marks tests as unit tests")
+    config.addinivalue_line(
+        "markers", "security: adversarial security suite (merge-blocking)"
+    )
+    config.addinivalue_line(
+        "markers", "isolation_matrix: tenant isolation matrix (merge-blocking)"
+    )
 
 
 # ─── Database fixture (testcontainers) ───────────────────────────────────────
@@ -251,6 +287,7 @@ _CLEANUP_TABLES = (
     "processing_jobs",
     "collection_documents",
     "document_tags",
+    "document_permissions",
     "collections",
     "document_versions",
     "documents",

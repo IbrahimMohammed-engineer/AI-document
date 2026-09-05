@@ -19,7 +19,7 @@ See:
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -658,6 +658,112 @@ class DocumentChunk(Base):
         return (
             f"<DocumentChunk version={self.document_version_id!r} "
             f"index={self.chunk_index} tokens={self.token_count}>"
+        )
+
+
+# ── DocumentPermission (Phase 16) ─────────────────────────────────────────────
+
+class DocumentPermission(Base):
+    """Explicit per-user access grant on a document (Phase 16).
+
+    The RESTRICTED access-level matrix: the owner always has access; every
+    OTHER org member is denied unless a row exists here for
+    (document_id, user_id) with permission_type in (read, write, admin) and
+    either no expiry or a live (future) ``expires_at``.
+
+    Grants are consulted by ``AuthorizationService.resolve_allowed_documents``
+    (retrieval gate) and ``authorize_document_version`` (point lookups).
+    """
+
+    __tablename__ = "document_permissions"
+    __table_args__ = (
+        CheckConstraint(
+            "permission_type IN ('read','write','admin')",
+            name="ck_document_permissions_type",
+        ),
+        UniqueConstraint(
+            "document_id", "user_id", name="uq_document_permissions_doc_user"
+        ),
+        Index(
+            "ix_document_permissions_lookup",
+            "document_id",
+            "user_id",
+        ),
+        Index(
+            "ix_document_permissions_organization_id",
+            "organization_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=generate_uuid,
+        server_default=text("gen_random_uuid()"),
+    )
+    organization_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="DENORMALIZED tenant scope — grants never cross organizations",
+    )
+    document_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="Grantee — must belong to the same organization",
+    )
+    permission_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="read",
+        server_default="read",
+        comment="read | write | admin",
+    )
+    granted_by: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="The owner/admin who created the grant",
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="NULL = grant never expires; past value = grant dormant",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    # ─── Relationships ────────────────────────────────────────────────────────
+    document: Mapped[Document] = relationship(
+        "Document", foreign_keys=[document_id], lazy="noload"
+    )
+    grantee: Mapped[User] = relationship(
+        "User", foreign_keys=[user_id], lazy="noload"
+    )
+    granter: Mapped[User] = relationship(
+        "User", foreign_keys=[granted_by], lazy="noload"
+    )
+
+    @property
+    def is_live(self) -> bool:
+        """True when the grant currently confers access (expiry-aware)."""
+        if self.expires_at is None:
+            return True
+        return self.expires_at > datetime.now(tz=timezone.utc)
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentPermission doc={self.document_id!r} "
+            f"user={self.user_id!r} type={self.permission_type!r}>"
         )
 
 

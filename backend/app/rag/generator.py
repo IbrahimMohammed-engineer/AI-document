@@ -33,6 +33,7 @@ See:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import AsyncIterator, Sequence
 
@@ -47,6 +48,47 @@ from app.rag.context_builder import ContextBundle
 from app.rag.prompts import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+# ── Canary-token defense (Phase 16 plan §3.3B) ────────────────────────────────
+#
+# The system prompt plants the §CANARY-INJECTED sentinel in the INSTRUCTION
+# channel and instructs the model to answer §CANARY-DETECTED if any SOURCE
+# block contains it. A response carrying §CANARY-* therefore means a
+# document hijacked the instruction channel: the contaminated sentence is
+# stripped and the caller writes INJECTION_ATTEMPT_DETECTED (counts/model
+# only — never prompt or answer text, Backend §54).
+_CANARY_RE = re.compile(r"§CANARY-\w+")
+
+
+def _detect_canary(text: str) -> bool:
+    """True when the raw LLM response references the canary sentinel."""
+    return bool(_CANARY_RE.search(text or ""))
+
+
+def _strip_canary_sentences(text: str) -> str:
+    """Remove sentences containing a §CANARY-* token from generated text."""
+    if not _detect_canary(text):
+        return text
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept = [s for s in sentences if not _CANARY_RE.search(s)]
+    return " ".join(s.strip() for s in kept if s.strip()).strip()
+
+
+def apply_canary_defense(text: str, *, model: str | None = None) -> tuple[str, bool]:
+    """Post-generation canary defense. Returns (clean_text, detected).
+
+    When the canary fires the contaminated sentence(s) are stripped and a
+    security warning is logged (the AUDIT write happens in the service layer,
+    which owns the DB session — generator stays session-free).
+    """
+    if not _detect_canary(text):
+        return text, False
+    logger.warning(
+        "INJECTION ATTEMPT: canary sentinel echoed in generation output "
+        "(model=%s) — contaminated sentence(s) stripped", model or "unknown",
+    )
+    return _strip_canary_sentences(text), True
 
 
 # ── Insufficient evidence (typed, NOT an HTTP error — Backend §48) ────────────
@@ -170,8 +212,9 @@ async def generate_answer(
     )
     start = time.perf_counter()
     response = await llm.generate(messages, stream=False, **_generation_params())
+    clean_text, _ = apply_canary_defense(response.content, model=response.model)
     return GeneratedAnswer(
-        text=response.content,
+        text=clean_text,
         model=response.model,
         prompt_tokens=response.prompt_tokens,
         completion_tokens=response.completion_tokens,

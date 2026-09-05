@@ -75,30 +75,79 @@ class _FakeSession:
 
 # ── _check_document_access_level ──────────────────────────────────────────────
 
+def _grant_ids(ids: list[str]):
+    """Fake execute() result for the Phase 16 grant lookup (rows of doc ids)."""
+    class _R:
+        def all(self):
+            return [(i,) for i in ids]
+
+    return _R()
+
+
+class _GrantSession:
+    """Async session stub whose execute() returns the given grant rows."""
+
+    def __init__(self, granted: list[str]):
+        self._granted = granted
+
+    async def execute(self, stmt: Any) -> Any:
+        return _grant_ids(self._granted)
+
+
 @pytest.mark.unit
 class TestCheckDocumentAccessLevel:
 
-    def test_organization_any_member(self):
+    @pytest.mark.asyncio
+    async def test_organization_any_member(self):
         doc = _document(access_level="organization", owner_id="someone-else")
-        assert AuthorizationService._check_document_access_level(doc, _user()) is True
+        assert await AuthorizationService._check_document_access_level(
+            doc, _user(), _GrantSession([])
+        ) is True
 
-    def test_private_owner_allowed(self):
+    @pytest.mark.asyncio
+    async def test_private_owner_allowed(self):
         doc = _document(access_level="private", owner_id="user-1")
-        assert AuthorizationService._check_document_access_level(doc, _user()) is True
+        assert await AuthorizationService._check_document_access_level(
+            doc, _user(), _GrantSession([])
+        ) is True
 
-    def test_private_non_owner_denied(self):
+    @pytest.mark.asyncio
+    async def test_private_non_owner_denied(self):
         doc = _document(access_level="private", owner_id="owner-2")
-        assert AuthorizationService._check_document_access_level(doc, _user()) is False
+        assert await AuthorizationService._check_document_access_level(
+            doc, _user(), _GrantSession([])
+        ) is False
 
-    def test_restricted_treated_as_org_accessible(self):
-        """Phase 7/16 placeholder behavior — restricted is org-readable for
-        now; hardening is Phase 16's job (plan §9.2 — do not change here)."""
+    @pytest.mark.asyncio
+    async def test_restricted_owner_always_allowed(self):
+        """Phase 16: the owner bypasses the grant table entirely."""
+        doc = _document(access_level="restricted", owner_id="user-1")
+        assert await AuthorizationService._check_document_access_level(
+            doc, _user(), _GrantSession([])
+        ) is True
+
+    @pytest.mark.asyncio
+    async def test_restricted_non_owner_with_live_grant(self):
+        """Phase 16: a live document_permissions grant confers access."""
         doc = _document(access_level="restricted", owner_id="someone-else")
-        assert AuthorizationService._check_document_access_level(doc, _user()) is True
+        assert await AuthorizationService._check_document_access_level(
+            doc, _user(), _GrantSession(["doc-1"])
+        ) is True
 
-    def test_unknown_access_level_denied(self):
+    @pytest.mark.asyncio
+    async def test_restricted_non_owner_without_grant_denied(self):
+        """Phase 16: RESTRICTED defaults to DENY for non-owners."""
+        doc = _document(access_level="restricted", owner_id="someone-else")
+        assert await AuthorizationService._check_document_access_level(
+            doc, _user(), _GrantSession([])
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_unknown_access_level_denied(self):
         doc = _document(access_level="top-secret")
-        assert AuthorizationService._check_document_access_level(doc, _user()) is False
+        assert await AuthorizationService._check_document_access_level(
+            doc, _user(), _GrantSession([])
+        ) is False
 
 
 # ── authorize_document_version ────────────────────────────────────────────────

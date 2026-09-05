@@ -12,6 +12,7 @@ import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
 import { PermissionDenied } from '@/components/PermissionDenied'
+import { PermissionManager } from '@/components/PermissionManager'
 import { ProcessingStatusBadge, UploadDialog } from '@/features/documents'
 import { useDeleteDocument, useDocumentList } from '@/hooks/queries/useDocuments'
 import { ApiError } from '@/lib/api/client'
@@ -46,8 +47,11 @@ function relativeTime(iso: string): string {
 
 export default function DocumentsPage() {
   const permissions = useAuthStore((s) => s.currentUser?.permissions)
+  const currentUserId = useAuthStore((s) => s.currentUser?.id)
   const canUpload = Boolean(permissions?.includes('document:create'))
   const canDelete = Boolean(permissions?.includes('document:delete'))
+  // Phase 16: grant management — the document owner or document:admin.
+  const canManageAccess = Boolean(permissions?.includes('document:admin'))
 
   const viewMode = useUiStore((s) => s.documentViewMode)
   const setViewMode = useUiStore((s) => s.setDocumentViewMode)
@@ -58,6 +62,8 @@ export default function DocumentsPage() {
   const [typeFilter, setTypeFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('active')
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  // Phase 16 — "Manage Access" modal target document
+  const [managingAccess, setManagingAccess] = useState<DocumentListItem | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
   const appliedSearch = search.trim()
@@ -239,6 +245,8 @@ export default function DocumentsPage() {
               doc={doc}
               canDelete={canDelete}
               onDelete={() => setDeletingId(doc.id)}
+              canManageAccess={canManageAccess || doc.owner_id === currentUserId}
+              onManageAccess={() => setManagingAccess(doc)}
             />
           ))}
         </div>
@@ -265,6 +273,15 @@ export default function DocumentsPage() {
                     <Link to={`/app/documents/${doc.id}`} className="documents-name-link">
                       {doc.name}
                     </Link>
+                    {doc.access_level === 'restricted' && (
+                      <span
+                        className="status-badge status-badge--neutral"
+                        style={{ marginLeft: '0.5rem' }}
+                        title="Restricted — explicit access grants only"
+                      >
+                        🔒 Restricted
+                      </span>
+                    )}
                   </td>
                   <td>{doc.document_type}</td>
                   <td>{doc.department ?? '—'}</td>
@@ -281,6 +298,16 @@ export default function DocumentsPage() {
                   <td>{doc.page_count ?? '—'}</td>
                   <td>{relativeTime(doc.updated_at)}</td>
                   <td>
+                    {(canManageAccess || doc.owner_id === currentUserId) && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        style={{ marginRight: '0.25rem' }}
+                        onClick={() => setManagingAccess(doc)}
+                      >
+                        Access
+                      </button>
+                    )}
                     {canDelete && (
                       <button
                         type="button"
@@ -336,7 +363,28 @@ export default function DocumentsPage() {
       )}
 
       <UploadDialog open={uploadOpen} onClose={() => setUploadOpen(false)} />
+
+      {/* Phase 16 — Manage Access (RESTRICTED grant management) */}
+      {managingAccess && (
+        <PermissionManager
+          documentId={managingAccess.id}
+          documentName={managingAccess.name}
+          open
+          onClose={() => setManagingAccess(null)}
+        />
+      )}
     </div>
+  )
+}
+
+function RestrictedBadge() {
+  return (
+    <span
+      className="status-badge status-badge--neutral"
+      title="Restricted — explicit access grants only"
+    >
+      🔒 Restricted
+    </span>
   )
 }
 
@@ -344,10 +392,14 @@ function DocumentCard({
   doc,
   canDelete,
   onDelete,
+  canManageAccess,
+  onManageAccess,
 }: {
   doc: DocumentListItem
   canDelete: boolean
   onDelete: () => void
+  canManageAccess: boolean
+  onManageAccess: () => void
 }) {
   return (
     <div className="card document-card">
@@ -355,12 +407,14 @@ function DocumentCard({
         <Link to={`/app/documents/${doc.id}`} className="documents-name-link">
           {doc.name}
         </Link>
-        {doc.processing_status && (
+        {doc.access_level === 'restricted' ? (
+          <RestrictedBadge />
+        ) : doc.processing_status ? (
           <ProcessingStatusBadge
             documentId={doc.id}
             status={doc.processing_status as VersionStatus}
           />
-        )}
+        ) : null}
       </div>
       <div className="text-sm text-muted">
         {doc.document_type}
@@ -377,11 +431,18 @@ function DocumentCard({
         }}
       >
         <span className="text-xs text-muted">{relativeTime(doc.updated_at)}</span>
-        {canDelete && (
-          <button type="button" className="btn btn-secondary btn-sm" onClick={onDelete}>
-            Delete
-          </button>
-        )}
+        <span style={{ display: 'flex', gap: '0.25rem' }}>
+          {canManageAccess && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onManageAccess}>
+              Access
+            </button>
+          )}
+          {canDelete && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onDelete}>
+              Delete
+            </button>
+          )}
+        </span>
       </div>
     </div>
   )

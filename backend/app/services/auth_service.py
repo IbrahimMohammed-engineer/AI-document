@@ -3,6 +3,7 @@ Authentication service for registration, login, refresh, logout, and reset flows
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.exceptions import AuthenticationError, ConflictError, TokenInvalidError
 from app.core.security import (
+    AlgorithmDowngradeBlockedError,
     create_access_token,
     create_refresh_token,
     decode_access_token,
@@ -24,12 +26,15 @@ from app.core.security import (
 from app.domain.permissions import get_user_permissions
 from app.infrastructure.password_reset_store import consume as consume_password_reset
 from app.infrastructure.password_reset_store import store as store_password_reset
+from app.models.organization import Organization
 from app.models.user import Role, User, UserRole
 from app.repositories.refresh_token_repository import RefreshTokenRepository
 from app.repositories.user_repository import OrganizationRepository, UserRepository
 from app.services.audit_logger import AuditAction, AuditLogger
 
 _DUMMY_PASSWORD_HASH = hash_password("phase-2-dummy-password")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -224,7 +229,50 @@ class AuthService:
 
     @staticmethod
     async def get_current_user(*, token: str, db: AsyncSession) -> User:
-        payload = decode_access_token(token)
+        try:
+            payload = decode_access_token(token)
+        except AlgorithmDowngradeBlockedError:
+            # Phase 16: algorithm-confusion attempt (HS256 token presented
+            # against RS256-pinned verification) — audit BEFORE the generic
+            # 401. The audit row is attributed to the CLAIMED org only when
+            # that organization actually exists (the token is attacker-
+            # controlled); metadata never carries the token or payload text.
+            logger.warning("JWT algorithm downgrade blocked (attempted HS256).")
+            claimed_org = None
+            try:
+                import jwt as _jwt
+
+                claimed_org = _jwt.decode(
+                    token, options={"verify_signature": False}
+                ).get("org_id")
+            except Exception:  # noqa: BLE001 — unparseable tokens have no claim
+                claimed_org = None
+            if claimed_org:
+                try:
+                    org_exists = (
+                        await db.execute(
+                            select(Organization.id).where(
+                                Organization.id == claimed_org
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if org_exists:
+                        await AuditLogger.log(
+                            db,
+                            organization_id=claimed_org,
+                            user_id=None,
+                            action=AuditAction.JWT_ALGORITHM_DOWNGRADE_BLOCKED,
+                            resource_type="auth",
+                            resource_id=None,
+                            metadata={"attempted_algorithm": "HS256"},
+                        )
+                        await db.commit()
+                except Exception:  # noqa: BLE001 — audit must never mask the 401
+                    logger.exception(
+                        "JWT_ALGORITHM_DOWNGRADE_BLOCKED audit write failed"
+                    )
+                    await db.rollback()
+            raise TokenInvalidError("Access token is invalid.")
         user_id = payload.get("sub")
         org_id = payload.get("org_id")
         if not user_id or not org_id:

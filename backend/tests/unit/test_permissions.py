@@ -4,8 +4,8 @@ Unit tests for pure permission evaluation (app/domain/permissions.py).
 Covers all 3 system roles × all permission keys plus edge cases
 (no roles, multiple roles). The role→permission assignments asserted here
 mirror the seeds from migrations 002 (base keys), 013 (conflict:resolve),
-and 014 (summary:regenerate + extraction:create — Admin/Editor only)
-exactly.
+014 (summary:regenerate + extraction:create — Admin/Editor only), and
+015 (document:admin — Admin only, Phase 16) exactly.
 """
 from __future__ import annotations
 
@@ -23,13 +23,15 @@ ALL_KEYS = [key.value for key in PermissionKey]
 
 # Mirrors migration 002 _seed_system_roles() + migration 013
 # _seed_conflict_permission() + migration 014 _seed_phase14_permissions()
-# (Admin/Editor only — never Viewer)
+# + migration 015 _seed_document_admin_permission() (Admin only — never
+# Viewer/Editor).
 ROLE_PERMISSIONS = {
     "Admin": {
         "document:create",
         "document:read",
         "document:update",
         "document:delete",
+        "document:admin",
         "chat:create",
         "comparison:create",
         "conflict:resolve",
@@ -71,8 +73,8 @@ def system_role(name: str) -> Role:
 # ─── PermissionKey catalog ────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_permission_key_catalog_has_twelve_entries():
-    assert len(list(PermissionKey)) == 12
+def test_permission_key_catalog_has_thirteen_entries():
+    assert len(list(PermissionKey)) == 13
     assert set(k.value for k in PermissionKey) == set(ALL_KEYS)
 
 

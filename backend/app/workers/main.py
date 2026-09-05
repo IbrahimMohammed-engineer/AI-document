@@ -24,6 +24,7 @@ from app.core.logging import setup_logging
 from app.workers.jobs import (
     reconciliation_sweep,
     run_processing_job,
+    run_retention_purge,
     trigger_conflict_scans,
 )
 
@@ -81,7 +82,12 @@ async def on_shutdown(ctx: dict) -> None:
 class WorkerSettings:
     """Arq worker configuration (consumed by `arq` / run_worker)."""
 
-    functions = [run_processing_job, reconciliation_sweep, trigger_conflict_scans]
+    functions = [
+        run_processing_job,
+        reconciliation_sweep,
+        trigger_conflict_scans,
+        run_retention_purge,
+    ]
 
     # Periodic reconciliation sweep — cron fields are wall-clock sets, so the
     # configured interval maps onto the seconds within each minute (an interval
@@ -104,6 +110,18 @@ class WorkerSettings:
         cron(
             trigger_conflict_scans,
             hour=settings.conflict_scan_hour,
+            minute=0,
+            second=0,
+            unique=True,
+            run_at_startup=False,
+            max_tries=1,
+        ),
+        # Phase 16: nightly retention hard-purge — soft-deleted documents
+        # past the retention window lose their DB rows and storage objects
+        # (plan §7). Default 03:00, one hour after the conflict scan.
+        cron(
+            run_retention_purge,
+            hour=settings.retention_purge_hour,
             minute=0,
             second=0,
             unique=True,

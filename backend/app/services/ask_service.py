@@ -69,6 +69,7 @@ from app.rag.citations import CitationExtraction, ResolvedCitation, resolve_cita
 from app.rag.context_builder import ContextBundle, build_context
 from app.rag.generator import (
     InsufficientEvidenceError,
+    apply_canary_defense,
     generate_answer,
     stream_answer,
 )
@@ -78,6 +79,7 @@ from app.rag.query_analyzer import analyze_query
 from app.rag.query_rewriter import rewrite_query
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
+from app.services.audit_logger import AuditAction, AuditLogger
 from app.services.conflict_service import ConflictNotice, ConflictService
 
 logger = logging.getLogger(__name__)
@@ -179,6 +181,9 @@ class AskOutcome:
     # exclusively from the DB query over the retrieved chunk set, never
     # from LLM output, so the FE banner cannot be hallucinated.
     conflicts: list[ConflictNotice] = field(default_factory=list)
+    # Phase 16: canary sentinel fired — a document attempted instruction
+    # hijack; contaminated sentence(s) were stripped before validation.
+    injection_attempt: bool = False
     model: str | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -346,6 +351,7 @@ class AskService:
                 done, user, citations=[],
                 conversation_id=conversation_id, message_id=assistant_message_id,
             )
+            await self._audit_question_answered(done, user)
             yield AskStreamEvent(type="sources", sources=[])
             yield AskStreamEvent(type="done", outcome=done)
             self._log_request(done, user)
@@ -416,6 +422,32 @@ class AskService:
 
         answer_text = "".join(answer_parts)
 
+        # ── Phase 16: canary defense — a §CANARY-* echo means a document
+        # hijacked the instruction channel. Strip contaminated sentence(s)
+        # BEFORE citation extraction, audit the attempt (counts/model only,
+        # never text), and surface the flag on the done payload.
+        answer_text, injection_detected = apply_canary_defense(
+            answer_text, model=llm.model_name if llm else None
+        )
+        if injection_detected:
+            try:
+                await AuditLogger.log(
+                    self._db,
+                    organization_id=user.organization_id,
+                    user_id=user.id,
+                    action=AuditAction.INJECTION_ATTEMPT_DETECTED,
+                    resource_type="ask",
+                    resource_id=conversation_id,
+                    metadata={
+                        "canary_hit": True,
+                        "model": llm.model_name if llm else None,
+                    },
+                )
+                await self._db.commit()
+            except Exception:  # noqa: BLE001 — defense must never fail the ask
+                logger.exception("INJECTION_ATTEMPT_DETECTED audit write failed")
+                await self._db.rollback()
+
         # Stopped before ANY token arrived: nothing to freeze or validate —
         # the question stays persisted (Phase 11 durability), no assistant
         # row is written (an empty answer is not an answer), and the done
@@ -471,11 +503,13 @@ class AskService:
             done.entailment_checks = validation.entailment_checks
             done.prompt_tokens = prompt_tokens
             done.completion_tokens = completion_tokens
+            done.injection_attempt = injection_detected
             timings.citation_ms = int((time.perf_counter() - start) * 1000)
             await self._persist(
                 done, user, citations=[],
                 conversation_id=conversation_id, message_id=assistant_message_id,
             )
+            await self._audit_question_answered(done, user)
             yield AskStreamEvent(type="sources", sources=[])
             yield AskStreamEvent(type="done", outcome=done)
             self._log_request(done, user)
@@ -489,6 +523,7 @@ class AskService:
         done.answer_text = answer_text
         done.final_answer = validation.final_text
         done.conflicts = conflicts_among_sources
+        done.injection_attempt = injection_detected
         done.sources = [
             AskSource(
                 index=block.index,
@@ -525,6 +560,7 @@ class AskService:
             done, user, citations=extraction.citations,
             conversation_id=conversation_id, message_id=assistant_message_id,
         )
+        await self._audit_question_answered(done, user)
 
         yield AskStreamEvent(type="sources", sources=done.sources)
         yield AskStreamEvent(type="done", outcome=done)
@@ -708,6 +744,32 @@ class AskService:
             await self._db.rollback()
 
     # ── Instrumentation ────────────────────────────────────────────────────
+
+    async def _audit_question_answered(self, done: AskOutcome, user: User) -> None:
+        """Phase 16 QUESTION_ANSWERED — the outcome envelope only.
+
+        Metadata carries groundedness + citation COUNT; never the question,
+        the answer, or any source text (Backend §54). Best-effort: an audit
+        failure is logged, never raised — the answer was already persisted.
+        """
+        try:
+            await AuditLogger.log(
+                self._db,
+                organization_id=user.organization_id,
+                user_id=user.id,
+                action=AuditAction.QUESTION_ANSWERED,
+                resource_type="conversation",
+                resource_id=done.message_id,
+                metadata={
+                    "groundedness": done.groundedness,
+                    "citations": len(done.citations),
+                    "stopped": done.stopped,
+                },
+            )
+            await self._db.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("QUESTION_ANSWERED audit write failed — continuing")
+            await self._db.rollback()
 
     def _log_request(self, outcome: AskOutcome, user: User) -> None:
         """Stage latencies + token/cost capture (roadmap Phase 9 steps 10–11).

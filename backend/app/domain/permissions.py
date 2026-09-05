@@ -17,6 +17,7 @@ class PermissionKey(StrEnum):
     DOCUMENT_READ = "document:read"
     DOCUMENT_UPDATE = "document:update"
     DOCUMENT_DELETE = "document:delete"
+    DOCUMENT_ADMIN = "document:admin"  # Phase 16 — grant management on RESTRICTED docs
     CHAT_CREATE = "chat:create"
     COMPARISON_CREATE = "comparison:create"
     CONFLICT_RESOLVE = "conflict:resolve"

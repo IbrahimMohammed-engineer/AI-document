@@ -59,6 +59,51 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip().lower()
 
 
+# ── Delimiter-injection defense (Phase 16 plan §3.3) ──────────────────────────
+#
+# The SOURCE-block delimiters below are RESERVED control tokens: chunk text
+# that begins a line with any of them could forge a new SOURCE header, a new
+# triple-quote block boundary, or fake metadata in the prompt. Matching lines
+# are prefixed with a visible warning marker rather than silently dropped —
+# evidence is preserved (audit traceability) but can no longer hijack the
+# delimiter structure. Anchored with re.match on the LSTRIPPED line, so
+# content that merely CONTAINS the words "source" or "document" mid-line is
+# untouched (Phase 16 plan §19 checklist).
+_CONTROL_LINE_RE = re.compile(
+    r'^(SOURCE\s+\d|Document:|Page:|Section:|""")',
+    re.IGNORECASE,
+)
+
+_CONTROL_LINE_MARKER = "WARNING[REDACTED CONTROL TOKEN] "
+
+
+def _sanitize_content(content: str) -> str:
+    """Redact control-format lines from untrusted chunk content.
+
+    Prevents delimiter-injection attacks where a malicious document embeds
+    fake SOURCE headers / triple-quote boundaries to forge citations or
+    hijack the instruction channel. Only lines that BEGIN with a reserved
+    control token are redacted; ordinary prose is never modified.
+    """
+    lines = content.splitlines(keepends=True)
+    sanitized = [
+        (_CONTROL_LINE_MARKER + line) if _CONTROL_LINE_RE.match(line.lstrip()) else line
+        for line in lines
+    ]
+    return "".join(sanitized)
+
+
+def _sanitize_metadata(value: str | None) -> str:
+    """Collapse newlines in header metadata (document/section names).
+
+    Metadata is rendered on a single header line inside the SOURCE block —
+    embedded newlines would let a forged name start a new control line
+    (e.g. a fake ``SOURCE 99`` header). Collapsing them keeps every
+    metadata value structurally inert.
+    """
+    return re.sub(r"[\r\n]+", " ", value or "")
+
+
 # ── Types ─────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -84,14 +129,16 @@ class SourceBlock:
 
     def format(self) -> str:
         """Render the block.  The delimiter format is unique to SOURCE
-        blocks — never reused elsewhere in any prompt (Backend §53)."""
+        blocks — never reused elsewhere in any prompt (Backend §53).
+        Metadata is newline-collapsed and content is sanitized so a forged
+        document can never break out of the evidence envelope (Phase 16)."""
         lines = [
             f"SOURCE {self.index}",
-            f"Document: {self.document_name}",
+            f"Document: {_sanitize_metadata(self.document_name)}",
             f"Page: {self.page_number}",
         ]
         if self.section_title:
-            lines.append(f"Section: {self.section_title}")
+            lines.append(f"Section: {_sanitize_metadata(self.section_title)}")
         lines.append('"""')
         lines.append(self.content)
         lines.append('"""')
@@ -194,7 +241,9 @@ def build_context(
             page_id=result.page_id,
             page_number=result.page_number,
             section_title=result.section_title,
-            content=result.content,
+            # SECURITY (Phase 16): untrusted chunk content is sanitized
+            # BEFORE it can touch any SOURCE-block delimiter.
+            content=_sanitize_content(result.content),
             relevance=result.relevance,
             token_count=0,
         )
@@ -211,9 +260,11 @@ def build_context(
         if not bundle.blocks:
             # A single chunk larger than the whole budget: truncate its
             # content to fit rather than answer with zero context.
+            # NOTE: block.content is already sanitized — truncation never
+            # re-introduces unsanitized text (Phase 16).
             overhead = _count_tokens(text[: text.find('"""')]) + 10
             allowed = max(1, budget_tokens - overhead)
-            truncated = _truncate_to_tokens(result.content, allowed)
+            truncated = _truncate_to_tokens(block.content, allowed)
             block.content = truncated + "\n…[truncated]"
             text = block.format()
             block.token_count = _count_tokens(text)

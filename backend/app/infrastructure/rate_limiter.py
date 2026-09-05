@@ -17,6 +17,7 @@ async def check_and_increment(
     key: str,
     limit: int,
     window_seconds: int,
+    message: str = "Too many requests. Please try again later.",
 ) -> int:
     now = time.time()
     member = f"{now}:{math.floor(now * 1000)}"
@@ -30,7 +31,7 @@ async def check_and_increment(
     if int(current_count) >= limit:
         ttl = await redis.ttl(key)
         raise RateLimitExceededError(
-            "Too many login attempts. Please try again later.",
+            message,
             headers={"Retry-After": str(max(ttl, 1))},
         )
 

@@ -42,10 +42,10 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import CurrentUser, DbSession, check_ai_rate_limit
 from app.core.config import get_settings
 from app.core.exceptions import ExternalServiceError
 from app.domain.versioning import VersionScope
@@ -125,6 +125,7 @@ def _done_event(e: AskStreamEvent) -> str:
         regenerated=outcome.regenerated,
         stripped_claims=outcome.stripped_claims,
         entailment_checks=outcome.entailment_checks,
+        injection_attempt=outcome.injection_attempt,
         latency_ms={
             "analyzer": outcome.timings.analyzer_ms,
             "rewrite": outcome.timings.rewrite_ms,
@@ -145,6 +146,7 @@ def _error_event(code: str, message: str) -> str:
 
 @router.post(
     "/ask",
+    dependencies=[Depends(check_ai_rate_limit)],
     summary="Ask a question over the document knowledge base (SSE stream)",
     description=(
         "Runs the full RAG pipeline — query analysis, conditional "

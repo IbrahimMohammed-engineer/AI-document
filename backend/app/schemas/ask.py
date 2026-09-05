@@ -206,6 +206,14 @@ class AskDonePayload(BaseModel):
     entailment_checks: int = Field(
         default=0, description="Entailment verification calls made for this answer."
     )
+    injection_attempt: bool = Field(
+        default=False,
+        description=(
+            "Phase 16: True when the canary sentinel fired — a document "
+            "attempted instruction hijack; contaminated sentence(s) were "
+            "stripped. FE shows a subtle security notice."
+        ),
+    )
     latency_ms: dict[str, Any] = Field(
         default_factory=dict,
         description=(

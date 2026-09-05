@@ -47,7 +47,7 @@ from typing import AsyncIterator
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import DbSession, require_permission
+from app.api.deps import DbSession, check_ai_rate_limit, require_permission
 from app.core.config import get_settings
 from app.core.exceptions import AppException, ExternalServiceError
 from app.domain.permissions import PermissionKey
@@ -161,6 +161,7 @@ def _chat_event_sse(event: ChatStreamEvent) -> str:
             completion_tokens=outcome.completion_tokens,
             stripped_claims=outcome.stripped_claims,
             entailment_checks=outcome.entailment_checks,
+            injection_attempt=outcome.injection_attempt,
             latency_ms={
                 "analyzer": outcome.timings.analyzer_ms,
                 "rewrite": outcome.timings.rewrite_ms,
@@ -478,6 +479,7 @@ def _citation_from_row(row: Citation) -> MessageCitationItem:
 
 @router.post(
     "/conversations",
+    dependencies=[Depends(check_ai_rate_limit)],
     summary="Create a conversation with its first message (SSE answer stream)",
     description=(
         "Lazy creation (DB §20): the conversation row is persisted BECAUSE a "
@@ -520,6 +522,7 @@ async def create_conversation(
 
 @router.post(
     "/conversations/{conversation_id}/messages",
+    dependencies=[Depends(check_ai_rate_limit)],
     summary="Ask a question in a conversation (SSE stream)",
     description=(
         "Flow 4 (Backend §63): scope re-validated against CURRENT permissions "

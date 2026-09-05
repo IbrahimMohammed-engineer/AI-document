@@ -61,6 +61,25 @@ class AuditAction:
     SUMMARY_REGENERATED = "SUMMARY_REGENERATED"
     EXTRACTION_RUN_CREATED = "EXTRACTION_RUN_CREATED"
 
+    # ── Security events (Phase 16) ────────────────────────────────────────────
+    # INVARIANT (Backend §54): NO provider payload — prompt text, question
+    # text, answer text, or document text — may ever appear in the metadata
+    # of any of these events. Counts, ids, and enumerated outcomes only.
+    # Canary hit post-generation — {"canary_hit": true, "model": ...}
+    INJECTION_ATTEMPT_DETECTED = "INJECTION_ATTEMPT_DETECTED"
+    # Retrieval scope resolved — {"version_count": N, "scope_kind": ...}
+    # (counts only — never the version IDs themselves)
+    RETRIEVAL_SCOPED = "RETRIEVAL_SCOPED"
+    # Answer outcome — {"groundedness": ..., "citations": N}
+    QUESTION_ANSWERED = "QUESTION_ANSWERED"
+    # Explicit RESTRICTED-document grants
+    DOCUMENT_PERMISSION_GRANTED = "DOCUMENT_PERMISSION_GRANTED"
+    DOCUMENT_PERMISSION_REVOKED = "DOCUMENT_PERMISSION_REVOKED"
+    # Retention cron hard-purge — {"version_count": N, "reason": "retention"}
+    DOCUMENT_HARD_PURGED = "DOCUMENT_HARD_PURGED"
+    # Algorithm-confusion attempt rejected — {"attempted_algorithm": "HS256"}
+    JWT_ALGORITHM_DOWNGRADE_BLOCKED = "JWT_ALGORITHM_DOWNGRADE_BLOCKED"
+
 
 class AuditLogger:
     @staticmethod

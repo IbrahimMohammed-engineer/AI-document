@@ -1613,3 +1613,158 @@ async def reconciliation_sweep(ctx: dict[str, Any]) -> int:
             len(candidates), requeued,
         )
     return requeued
+
+
+# ── Phase 16: data retention / hard purge ─────────────────────────────────────
+
+async def run_retention_purge(ctx: dict[str, Any]) -> int:
+    """Hard-purge soft-deleted documents past the retention window (Phase 16).
+
+    Nightly cron. For each eligible document (``deleted_at`` older than
+    ``retention_purge_days``), in ONE transaction per batch:
+
+      1. Delete RESTRICT-referencing child rows first (citations, summaries,
+         extractions, conflict statements, comparisons) — these would
+         otherwise block the document delete.
+      2. DELETE the documents root row — versions/chunks/pages/sections,
+         collection memberships, tags, permissions, and processing jobs all
+         CASCADE from it.
+
+    The DB transaction COMMITS before any storage object is touched:
+    a storage failure is logged and does NOT roll back the purge —
+    orphaned objects are reconciled next run (plan §7.2B). A
+    DOCUMENT_HARD_PURGED audit row is written per document (metadata:
+    version count + reason only).
+
+    Returns the number of documents hard-purged.
+    """
+    from sqlalchemy import text
+
+    from app.infrastructure.database import get_session_factory
+    from app.services.audit_logger import AuditAction, AuditLogger
+
+    settings = get_settings()
+    if not settings.retention_purge_enabled:
+        return 0
+
+    cutoff = utc_now() - timedelta(days=settings.retention_purge_days)
+    batch = settings.retention_purge_batch_size
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        # Collect eligible documents + their version storage keys + counts
+        # in one pass (storage deletion happens after the DB commit).
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT d.id, d.organization_id, "
+                    "       COUNT(v.id) AS version_count, "
+                    "       COALESCE(array_agg(v.storage_key), '{}') AS storage_keys "
+                    "FROM documents d "
+                    "LEFT JOIN document_versions v ON v.document_id = d.id "
+                    "WHERE d.deleted_at IS NOT NULL AND d.deleted_at <= :cutoff "
+                    "GROUP BY d.id, d.organization_id "
+                    "ORDER BY d.deleted_at "
+                    "LIMIT :batch"
+                ),
+                {"cutoff": cutoff, "batch": batch},
+            )
+        ).all()
+
+        if not rows:
+            return 0
+
+        doc_ids = [str(row[0]) for row in rows]
+
+        # ── RESTRICT-referencing children FIRST (FK-safe order) ───────────
+        await session.execute(
+            text("DELETE FROM document_extraction_items "
+                 "WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))"),
+            {"doc_ids": doc_ids},
+        )
+        await session.execute(
+            text("DELETE FROM citations "
+                 "WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))"),
+            {"doc_ids": doc_ids},
+        )
+        await session.execute(
+            text("DELETE FROM document_summaries "
+                 "WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))"),
+            {"doc_ids": doc_ids},
+        )
+        await session.execute(
+            text("DELETE FROM document_extractions "
+                 "WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))"),
+            {"doc_ids": doc_ids},
+        )
+        await session.execute(
+            text("DELETE FROM conflict_statements "
+                 "WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))"),
+            {"doc_ids": doc_ids},
+        )
+        await session.execute(
+            text(
+                "DELETE FROM document_comparisons "
+                "WHERE document_a_version_id IN "
+                "  (SELECT id FROM document_versions "
+                "   WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))) "
+                "   OR document_b_version_id IN "
+                "  (SELECT id FROM document_versions "
+                "   WHERE document_id = ANY(CAST(:doc_ids AS uuid[])))"
+            ),
+            {"doc_ids": doc_ids},
+        )
+
+        # ── Audit BEFORE the root delete (rows must exist post-commit) ────
+        for doc_id, organization_id, version_count, _keys in rows:
+            try:
+                await AuditLogger.log(
+                    session,
+                    organization_id=str(organization_id),
+                    user_id=None,
+                    action=AuditAction.DOCUMENT_HARD_PURGED,
+                    resource_type="document",
+                    resource_id=str(doc_id),
+                    metadata={"version_count": int(version_count), "reason": "retention"},
+                )
+            except Exception:  # noqa: BLE001 — audit failure never blocks purge
+                logger.exception(
+                    "DOCUMENT_HARD_PURGED audit write failed for %s", doc_id
+                )
+
+        # ── Root delete — everything else CASCADEs from documents ─────────
+        result = await session.execute(
+            text("DELETE FROM documents WHERE id = ANY(CAST(:doc_ids AS uuid[]))"),
+            {"doc_ids": doc_ids},
+        )
+        purged = result.rowcount or 0
+        await session.commit()
+
+    # ── AFTER commit: storage deletion (failure never rolls back the DB) ──
+    storage = None
+    try:
+        storage = get_storage_provider()
+    except Exception:  # noqa: BLE001 — provider misconfiguration is not fatal here
+        logger.warning("Retention purge: storage provider unavailable — "
+                       "objects left for the next run's reconciliation.")
+
+    orphaned = 0
+    if storage is not None:
+        for _doc_id, _org, _count, storage_keys in rows:
+            for key in storage_keys or []:
+                try:
+                    await storage.delete(key)
+                except StorageObjectMissingError:
+                    continue  # already gone — fine
+                except Exception:  # noqa: BLE001
+                    orphaned += 1
+                    logger.warning(
+                        "Retention purge: failed to delete storage object %s — "
+                        "left for reconciliation", key,
+                    )
+
+    logger.info(
+        "Retention purge: %d document(s) hard-purged (cutoff=%s, %d orphaned object(s))",
+        purged, cutoff.isoformat(), orphaned,
+    )
+    return purged

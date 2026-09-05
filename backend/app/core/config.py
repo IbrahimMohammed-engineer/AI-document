@@ -11,7 +11,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -107,12 +107,64 @@ class Settings(BaseSettings):
     signed_url_expires_seconds: int = 900  # 15 minutes
 
     # ─── JWT / Auth ───────────────────────────────────────────────────────────
+    # Phase 16: tokens are signed RS256 (asymmetric). jwt_secret_key remains
+    # as the dev/test fallback signing secret when no RSA keypair is
+    # configured; production RS256 deployments never use it.
     jwt_secret_key: str = Field(
-        description="Secret key for signing JWT access tokens — must be long and random in production",
+        description="Legacy/dev fallback secret for JWT signing — long and random in production",
     )
-    jwt_algorithm: str = "HS256"
+    jwt_algorithm: Literal["RS256", "HS256"] = "RS256"
+    jwt_private_key: str = Field(
+        default="",
+        description="PEM-encoded RSA private key used to SIGN access tokens (RS256)",
+    )
+    jwt_public_key: str = Field(
+        default="",
+        description="PEM-encoded RSA public key used to VERIFY access tokens (RS256)",
+    )
+    # Read-only rollover shim: when set, tokens signed with the OLD HS256
+    # secret are still VERIFIED (never re-issued) during key rotation. MUST
+    # be removed once the rollover window closes (Phase 16 plan §4.3).
+    jwt_hs256_secret: str = ""
     jwt_access_token_expire_minutes: int = 15
     jwt_refresh_token_expire_days: int = 7
+
+    # ─── AI endpoint rate limiting (Phase 16) ─────────────────────────────────
+    # Per-user sliding-window limit on the LLM-cost endpoints (/ask,
+    # /chat/conversations, /chat/conversations/{id}/messages) — denial-of-
+    # wallet defense. Pre-stream HTTP 429 with Retry-After.
+    ai_rate_limit_requests: int = Field(
+        default=20,
+        description="Max AI requests per user per rolling window",
+    )
+    ai_rate_limit_window_seconds: int = Field(
+        default=60,
+        description="Rolling window (seconds) for the AI rate limit",
+    )
+
+    # ─── Data retention (Phase 16) ─────────────────────────────────────────────
+    # Soft-deleted documents are hard-purged (DB rows + storage objects) after
+    # retention_purge_days by the nightly run_retention_purge cron.
+    retention_purge_enabled: bool = Field(
+        default=True,
+        description="Enable the nightly retention hard-purge cron",
+    )
+    retention_purge_days: int = Field(
+        default=90,
+        ge=1,
+        description="Days after soft-delete before a document is hard-purged",
+    )
+    retention_purge_batch_size: int = Field(
+        default=50,
+        ge=1,
+        description="Maximum documents hard-purged per cron run",
+    )
+    retention_purge_hour: int = Field(
+        default=3,
+        ge=0,
+        le=23,
+        description="Hour of day the nightly retention purge cron fires",
+    )
 
     # ─── AI Providers ─────────────────────────────────────────────────────────
     openai_api_key: str | None = None
@@ -405,6 +457,35 @@ class Settings(BaseSettings):
             # Allow the placeholder in development but warn
             pass
         return v
+
+    @field_validator("jwt_private_key", "jwt_public_key", mode="after")
+    @classmethod
+    def unescape_pem_newlines(cls, v: str) -> str:
+        """Accept PEM keys written with literal \\n escapes (as in .env files).
+
+        dotenv files cannot hold multi-line values, so operators paste keys
+        with ``\\n`` sequences (see .env.example); convert them to real
+        newlines. Values that already contain real newlines pass through.
+        """
+        if v and "\n" not in v and "\\n" in v:
+            return v.replace("\\n", "\n")
+        return v
+
+    @model_validator(mode="after")
+    def validate_jwt_key_config(self) -> "Settings":
+        """Fail fast on insecure JWT configuration (Phase 16).
+
+        Production RS256 deployments MUST have an RSA keypair configured —
+        silently falling back to the shared HS256 secret in production would
+        reintroduce the symmetric-key vulnerability this migration removes.
+        """
+        if self.jwt_algorithm == "RS256" and self.is_production:
+            if not self.jwt_private_key or not self.jwt_public_key:
+                raise ValueError(
+                    "JWT_ALGORITHM=RS256 in production requires JWT_PRIVATE_KEY "
+                    "and JWT_PUBLIC_KEY — generate with openssl (see .env.example)."
+                )
+        return self
 
     @property
     def is_production(self) -> bool:
