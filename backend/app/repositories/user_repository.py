@@ -17,11 +17,11 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import selectinload
 
 from app.models.organization import Organization
-from app.models.user import Role, User
+from app.models.user import Role, User, UserRole
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
 logger = logging.getLogger(__name__)
@@ -114,6 +114,82 @@ class UserRepository(TenantScopedRepository[User]):
             )
         )
         return result.scalar_one_or_none()
+
+    async def list_by_org(
+        self,
+        organization_id: str | UUID,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[User], int]:
+        """Paginated member list for the Settings → Users page (Phase 15).
+
+        Includes inactive users (they are still members shown in the table)
+        but excludes soft-deleted ones. Roles are eager-loaded so the API can
+        render role badges without N+1 queries.
+
+        Returns:
+            (users ordered by created_at then full_name, total matching rows)
+        """
+        base = select(User).where(
+            self._org_filter(organization_id),
+            User.deleted_at.is_(None),
+        )
+
+        total_result = await self._session.execute(
+            select(func.count()).select_from(base.subquery())
+        )
+        total = int(total_result.scalar_one())
+
+        result = await self._session.execute(
+            base.options(selectinload(User.roles))
+            .order_by(User.created_at, User.full_name)
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(result.scalars().all()), total
+
+    async def update_profile(
+        self,
+        user_id: str | UUID,
+        *,
+        full_name: str,
+    ) -> None:
+        """Update the caller's own display name (PATCH /settings/profile)."""
+        await self._session.execute(
+            update(User)
+            .where(User.id == str(user_id), User.deleted_at.is_(None))
+            .values(full_name=full_name)
+        )
+        await self._session.flush()
+
+    async def set_roles(
+        self,
+        user_id: str | UUID,
+        organization_id: str | UUID,
+        role_ids: list[str | UUID],
+    ) -> None:
+        """Replace a user's role assignments (org-scoped, Phase 15).
+
+        Deletes existing user_roles rows then inserts the new set. Role IDs
+        are validated by the caller (must exist and belong to the org or be
+        system roles). Does NOT commit — the request-scoped transaction does.
+        """
+        await self._session.execute(
+            delete(UserRole).where(
+                UserRole.user_id == str(user_id),
+                UserRole.organization_id == str(organization_id),
+            )
+        )
+        for role_id in role_ids:
+            self._session.add(
+                UserRole(
+                    user_id=str(user_id),
+                    role_id=str(role_id),
+                    organization_id=str(organization_id),
+                )
+            )
+        await self._session.flush()
 
     async def list_for_org(
         self,

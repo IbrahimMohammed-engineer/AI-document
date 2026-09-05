@@ -1,0 +1,129 @@
+/* PdfViewer + in-document search (Phase 15 §6.4). */
+
+.pdf-viewer {
+  position: relative;
+  overflow: auto;
+  background: var(--color-neutral-100);
+  border-radius: var(--radius-md);
+  min-height: 320px;
+  display: flex;
+  justify-content: center;
+  padding: var(--space-4);
+  outline-offset: -2px;
+}
+
+.pdf-viewer:focus-visible {
+  outline: 2px solid var(--color-primary-400);
+}
+
+.pdf-page-surface {
+  position: relative;
+  box-shadow: var(--shadow-md);
+  background: #fff;
+  flex-shrink: 0;
+}
+
+.pdf-page-surface canvas {
+  display: block;
+}
+
+/* The text layer sits exactly over the canvas — transparent ink so canvas
+   glyphs show through while real DOM text stays selectable/searchable. */
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  color: transparent;
+  cursor: text;
+}
+
+.pdf-text-layer span::selection {
+  background: hsl(220, 85%, 50%, 0.35);
+}
+
+mark.pdf-search-mark {
+  background: var(--color-warning);
+  color: transparent;
+  border-radius: 2px;
+  padding: 0;
+}
+
+mark.pdf-search-mark[data-match-active='true'] {
+  background: hsl(38, 92%, 50%);
+  color: var(--color-neutral-900);
+  outline: 2px solid hsl(38, 92%, 38%);
+}
+
+/* ── In-document search bar ─────────────────────────────────────────────────*/
+.document-search-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--surface-card);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.document-search-bar input {
+  flex: 1;
+  min-width: 160px;
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-2);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-800);
+}
+
+.document-search-count {
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-500);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Version selector ───────────────────────────────────────────────────────*/
+.version-selector {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-600);
+}
+
+.version-selector select {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  background: var(--surface-card);
+  color: var(--color-neutral-800);
+}
+
+/* ── Viewer toolbar (zoom controls) ─────────────────────────────────────────*/
+.viewer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.viewer-toolbar select {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  background: var(--surface-card);
+  color: var(--color-neutral-800);
+}
+
+.viewer-page-status {
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-500);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

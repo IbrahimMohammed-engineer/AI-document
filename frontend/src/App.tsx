@@ -1,165 +1,86 @@
 /**
  * Application root — routing and provider setup.
  *
- * Route structure mirrors the Information Architecture from
- * Frontend-Design-Documentation.md §4.2.
- *
- * Phase 2: auth guard (PrivateRoute), public auth routes (login, register,
- * forgot/reset password), boot-time session restore via the refresh cookie,
- * and the session-expired redirect wired to the API client's 401 handler.
+ * Phase 15: all page components are React.lazy()-loaded (route-level code
+ * splitting, §6.1.4); the PlaceholderPage components are gone — Documents,
+ * Search, Research, Settings and the 404 route are real screens now. Each
+ * route declares `handle: { crumb }` for the Breadcrumbs component.
  */
 import { useEffect } from 'react'
-import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { AppShell } from '@/components/layout/AppShell'
+import { NotFoundPage } from '@/components/NotFoundPage'
 import { setSessionExpiredHandler } from '@/lib/api/client'
 import { useAuthStore } from '@/store/authStore'
-import {
-  ForgotPasswordPage,
-  LoginPage,
-  RegisterPage,
-  ResetPasswordPage,
-} from '@/features/auth'
-import { DocumentWorkspace } from '@/features/documents'
-import { ComparisonPage } from '@/features/documents'
-import { AskPage } from '@/features/ask'
-import { ConflictDetailPage, ConflictsPage } from '@/features/conflicts'
-import { SummaryPage } from '@/features/summary'
-import {
-  ExtractionDetailPage,
-  ExtractionListPage,
-} from '@/features/extraction'
-import { AnalyticsPage } from '@/features/analytics'
-import { useConflictScanStatus, useConflicts } from '@/hooks/queries/useConflicts'
 
-/** Lightweight open-conflict count for the Dashboard KPI card. */
-function useOpenConflictCount() {
-  const query = useConflicts('OPEN')
-  return { data: query.isLoading ? undefined : (query.data?.items.length ?? 0) }
-}
+// ── Route-level code splitting (§6.1.4 / §6.14) ──────────────────────────────
+import { lazy, Suspense } from 'react'
 
-// ── Placeholder page components ───────────────────────────────────────────────
-// These will be replaced with full implementations in later phases.
+const LoginPage = lazy(() =>
+  import('@/features/auth').then((m) => ({ default: m.LoginPage })),
+)
+const RegisterPage = lazy(() =>
+  import('@/features/auth').then((m) => ({ default: m.RegisterPage })),
+)
+const ForgotPasswordPage = lazy(() =>
+  import('@/features/auth').then((m) => ({ default: m.ForgotPasswordPage })),
+)
+const ResetPasswordPage = lazy(() =>
+  import('@/features/auth').then((m) => ({ default: m.ResetPasswordPage })),
+)
 
-function PlaceholderPage({ title, description }: { title: string; description: string }) {
-  return (
-    <div>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">{title}</h1>
-          <p className="page-subtitle">{description}</p>
-        </div>
-      </div>
-      <div className="card empty-state">
-        <div className="empty-state-icon">🚧</div>
-        <div className="empty-state-title">Coming in a future phase</div>
-        <p className="empty-state-description">
-          This page is scaffolded and ready to be implemented. The backend APIs,
-          data models, and repositories supporting this feature are being built
-          phase by phase.
-        </p>
-      </div>
-    </div>
-  )
-}
+const DashboardPage = lazy(() => import('@/features/dashboard/DashboardPage'))
+const DocumentsPage = lazy(() => import('@/features/documents/DocumentsPage'))
+const DocumentWorkspace = lazy(() =>
+  import('@/features/documents').then((m) => ({ default: m.DocumentWorkspace })),
+)
+const ComparisonPage = lazy(() =>
+  import('@/features/documents').then((m) => ({ default: m.ComparisonPage })),
+)
+const AskPage = lazy(() =>
+  import('@/features/ask').then((m) => ({ default: m.AskPage })),
+)
+const ResearchWorkspace = lazy(() =>
+  import('@/features/research/ResearchWorkspace').then((m) => ({
+    default: m.ResearchWorkspace,
+  })),
+)
+const SearchPage = lazy(() => import('@/features/search/SearchPage'))
+const ConflictsPage = lazy(() =>
+  import('@/features/conflicts').then((m) => ({ default: m.ConflictsPage })),
+)
+const ConflictDetailPage = lazy(() =>
+  import('@/features/conflicts').then((m) => ({ default: m.ConflictDetailPage })),
+)
+const SummaryPage = lazy(() =>
+  import('@/features/summary').then((m) => ({ default: m.SummaryPage })),
+)
+const ExtractionListPage = lazy(() =>
+  import('@/features/extraction').then((m) => ({ default: m.ExtractionListPage })),
+)
+const ExtractionDetailPage = lazy(() =>
+  import('@/features/extraction').then((m) => ({ default: m.ExtractionDetailPage })),
+)
+const AnalyticsPage = lazy(() =>
+  import('@/features/analytics').then((m) => ({ default: m.AnalyticsPage })),
+)
 
-function DashboardPage() {
-  // Phase 13 — the "Open Conflicts" KPI is now live (the other cards stay
-  // placeholders for their owning phases).
-  const scanStatusQuery = useConflictScanStatus()
-  const openConflictsQuery = useOpenConflictCount()
-  const openConflicts = openConflictsQuery.data ?? '—'
-
-  return (
-    <div>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Dashboard</h1>
-          <p className="page-subtitle">Overview of your organization's document activity</p>
-        </div>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
-        {[
-          { label: 'Total Documents', value: '—', icon: '📄', phase: 3 },
-          { label: 'Active Conversations', value: '—', icon: '✦', phase: 9 },
-          { label: 'Documents Processing', value: '—', icon: '⚙', phase: 5 },
-        ].map((stat) => (
-          <div key={stat.label} className="card" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: '1.5rem' }}>{stat.icon}</span>
-              <span className="badge badge-gray">Phase {stat.phase}</span>
-            </div>
-            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--color-neutral-800)' }}>
-              {stat.value}
-            </div>
-            <div className="text-sm text-muted">{stat.label}</div>
-          </div>
-        ))}
-        <Link
-          to="/app/conflicts"
-          className="card"
-          style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', textDecoration: 'none' }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '1.5rem' }}>⚠</span>
-            <span className="badge badge-gray">Phase 13</span>
-          </div>
-          <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--color-neutral-800)' }}>
-            {openConflicts}
-          </div>
-          <div className="text-sm text-muted">
-            Open Conflicts
-            {scanStatusQuery.data?.unscanned_document_count
-              ? ` · ${scanStatusQuery.data.unscanned_document_count} unscanned`
-              : ''}
-          </div>
-        </Link>
-      </div>
-
-      <div className="card">
-        <div style={{ marginBottom: '1rem', fontWeight: 600, color: 'var(--color-neutral-700)' }}>
-          Implementation Progress
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-          {[
-            { phase: 0, label: 'Project Setup & Scaffold', done: true },
-            { phase: 1, label: 'Database Foundation & Migrations', done: true },
-            { phase: 2, label: 'Authentication & Authorization', done: false },
-            { phase: 3, label: 'Document Management', done: false },
-            { phase: 4, label: 'Background Processing (Redis/Arq)', done: false },
-            { phase: 5, label: 'Document Extraction & OCR', done: false },
-            { phase: 6, label: 'Chunking & Structure Detection', done: false },
-            { phase: 7, label: 'Embeddings & pgvector', done: false },
-            { phase: 8, label: 'Hybrid Search & Reranking', done: false },
-            { phase: 9, label: 'RAG Pipeline & Conversations', done: false },
-            { phase: 10, label: 'Citations & Conflict Detection', done: false },
-          ].map((item) => (
-            <div
-              key={item.phase}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.75rem',
-                padding: '0.5rem 0.75rem',
-                borderRadius: 'var(--radius-md)',
-                background: item.done ? 'hsl(152,50%,96%)' : 'transparent',
-                border: '1px solid',
-                borderColor: item.done ? 'hsl(152,40%,85%)' : 'transparent',
-              }}
-            >
-              <span style={{ fontSize: '1rem' }}>{item.done ? '✅' : '⬜'}</span>
-              <span style={{ fontSize: '0.875rem', fontWeight: 500, color: 'var(--color-neutral-600)' }}>
-                Phase {item.phase}
-              </span>
-              <span style={{ fontSize: '0.875rem', color: 'var(--color-neutral-700)' }}>
-                {item.label}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
+const SettingsLayout = lazy(() =>
+  import('@/features/settings/SettingsLayout').then((m) => ({
+    default: m.SettingsLayout,
+  })),
+)
+const ProfilePage = lazy(() => import('@/features/settings/ProfilePage'))
+const OrganizationPage = lazy(() => import('@/features/settings/OrganizationPage'))
+const UsersPage = lazy(() => import('@/features/settings/UsersPage'))
+const RolesPage = lazy(() => import('@/features/settings/RolesPage'))
+const AISettingsPage = lazy(() => import('@/features/settings/AISettingsPage'))
+const DocumentSettingsPage = lazy(() =>
+  import('@/features/settings/DocumentSettingsPage'),
+)
+const IntegrationsPage = lazy(() => import('@/features/settings/IntegrationsPage'))
+const SecurityPage = lazy(() => import('@/features/settings/SecurityPage'))
+const AuditLogPage = lazy(() => import('@/features/settings/AuditLogPage'))
 
 // ── Auth guard ────────────────────────────────────────────────────────────────
 
@@ -213,10 +134,38 @@ export function App() {
       <Route path="/" element={<Navigate to="/app/dashboard" replace />} />
 
       {/* Public auth routes */}
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/register" element={<RegisterPage />} />
-      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-      <Route path="/reset-password" element={<ResetPasswordPage />} />
+      <Route
+        path="/login"
+        element={
+          <Suspense fallback={null}>
+            <LoginPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/register"
+        element={
+          <Suspense fallback={null}>
+            <RegisterPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/forgot-password"
+        element={
+          <Suspense fallback={null}>
+            <ForgotPasswordPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/reset-password"
+        element={
+          <Suspense fallback={null}>
+            <ResetPasswordPage />
+          </Suspense>
+        }
+      />
 
       {/* App routes — auth guarded */}
       <Route
@@ -228,32 +177,114 @@ export function App() {
         }
       >
         <Route index element={<Navigate to="/app/dashboard" replace />} />
-        <Route path="dashboard" element={<DashboardPage />} />
-        <Route path="documents" element={<PlaceholderPage title="Documents" description="Document library — Phase 3" />} />
-        <Route path="documents/:id" element={<DocumentWorkspace />} />
-        <Route path="ask" element={<AskPage />} />
-        <Route path="ask/:conversationId" element={<PlaceholderPage title="Conversation" description="AI Chat with citation rendering — Phase 9" />} />
-        <Route path="search" element={<PlaceholderPage title="Search" description="Hybrid semantic + keyword search — Phase 8" />} />
-        {/* Phase 12 — Document comparison (version picker + live results) */}
-        <Route path="compare" element={<ComparisonPage />} />
-        <Route path="compare/:comparisonId" element={<ComparisonPage />} />
-        {/* Phase 13 — Conflict detection (list + review/resolution workflow) */}
-        <Route path="conflicts" element={<ConflictsPage />} />
-        <Route path="conflicts/:id" element={<ConflictDetailPage />} />
-        {/* Phase 14 — Document summary + structured extraction (FE §6.12) */}
-        <Route path="documents/:id/summary" element={<SummaryPage />} />
-        <Route path="documents/:id/extractions" element={<ExtractionListPage />} />
+        <Route
+          path="dashboard"
+          element={<DashboardPage />}
+          handle={{ crumb: 'Dashboard' }}
+        />
+        {/* Phase 15 — Documents library (replaces PlaceholderPage) */}
+        <Route
+          path="documents"
+          element={<DocumentsPage />}
+          handle={{ crumb: 'Documents' }}
+        />
+        <Route
+          path="documents/:id"
+          element={<DocumentWorkspace />}
+          handle={{ crumb: (params) => params.id ?? 'Document' }}
+        />
+        <Route
+          path="documents/:id/summary"
+          element={<SummaryPage />}
+          handle={{ crumb: 'Summary' }}
+        />
+        <Route
+          path="documents/:id/extractions"
+          element={<ExtractionListPage />}
+          handle={{ crumb: 'Extractions' }}
+        />
         <Route
           path="documents/:id/extractions/:extractionId"
           element={<ExtractionDetailPage />}
+          handle={{ crumb: 'Extraction' }}
         />
-        <Route path="analytics" element={<AnalyticsPage />} />
-        <Route path="settings" element={<PlaceholderPage title="Settings" description="Organization, users, roles, integrations — Phase 3+" />} />
-        <Route path="settings/*" element={<PlaceholderPage title="Settings" description="Organization settings — Phase 3+" />} />
+        {/* Phase 15 — Research Workspace (three-panel) */}
+        <Route
+          path="research"
+          element={<ResearchWorkspace />}
+          handle={{ crumb: 'Research' }}
+        />
+        <Route path="ask" element={<AskPage />} handle={{ crumb: 'Ask AI' }} />
+        {/* Phase 15 — Search page (replaces PlaceholderPage) */}
+        <Route path="search" element={<SearchPage />} handle={{ crumb: 'Search' }} />
+        {/* Phase 12 — Document comparison (version picker + live results) */}
+        <Route
+          path="compare"
+          element={<ComparisonPage />}
+          handle={{ crumb: 'Compare' }}
+        />
+        <Route
+          path="compare/:comparisonId"
+          element={<ComparisonPage />}
+          handle={{ crumb: 'Comparison' }}
+        />
+        {/* Phase 13 — Conflict detection (list + review/resolution workflow) */}
+        <Route
+          path="conflicts"
+          element={<ConflictsPage />}
+          handle={{ crumb: 'Conflicts' }}
+        />
+        <Route
+          path="conflicts/:id"
+          element={<ConflictDetailPage />}
+          handle={{ crumb: 'Conflict' }}
+        />
+        <Route
+          path="analytics"
+          element={<AnalyticsPage />}
+          handle={{ crumb: 'Analytics' }}
+        />
+        {/* Phase 15 — full Settings tree (replaces PlaceholderPage) */}
+        <Route path="settings" element={<SettingsLayout />} handle={{ crumb: 'Settings' }}>
+          <Route index element={<Navigate to="profile" replace />} />
+          <Route path="profile" element={<ProfilePage />} handle={{ crumb: 'Profile' }} />
+          <Route
+            path="organization"
+            element={<OrganizationPage />}
+            handle={{ crumb: 'Organization' }}
+          />
+          <Route path="users" element={<UsersPage />} handle={{ crumb: 'Users' }} />
+          <Route path="roles" element={<RolesPage />} handle={{ crumb: 'Roles' }} />
+          <Route
+            path="ai"
+            element={<AISettingsPage />}
+            handle={{ crumb: 'AI Settings' }}
+          />
+          <Route
+            path="documents"
+            element={<DocumentSettingsPage />}
+            handle={{ crumb: 'Documents' }}
+          />
+          <Route
+            path="integrations"
+            element={<IntegrationsPage />}
+            handle={{ crumb: 'Integrations' }}
+          />
+          <Route
+            path="security"
+            element={<SecurityPage />}
+            handle={{ crumb: 'Security' }}
+          />
+          <Route
+            path="audit-log"
+            element={<AuditLogPage />}
+            handle={{ crumb: 'Audit Log' }}
+          />
+        </Route>
       </Route>
 
       {/* 404 */}
-      <Route path="*" element={<PlaceholderPage title="Page Not Found" description="The page you're looking for doesn't exist." />} />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   )
 }

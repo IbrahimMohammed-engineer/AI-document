@@ -14,7 +14,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   streamChatMessage,
   type ChatScopePayload,
@@ -65,7 +65,12 @@ function nextTurnId(): string {
 
 export function AskPage() {
   // ── Conversation state ────────────────────────────────────────────────
-  const [conversationId, setConversationId] = useState<string | null>(null)
+  // Deep links (Dashboard "Recent Questions", command palette):
+  // /app/ask?conversation={id} opens that conversation directly.
+  const [searchParams] = useSearchParams()
+  const [conversationId, setConversationId] = useState<string | null>(
+    () => searchParams.get('conversation'),
+  )
   const conversationsQuery = useConversations()
   const conversationQuery = useConversation(conversationId)
   const deleteConversation = useDeleteConversation()

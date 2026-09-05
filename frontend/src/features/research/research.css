@@ -1,0 +1,256 @@
+/* Research Workspace — three-panel layout (Phase 15 §6.5). */
+
+.research-workspace {
+  display: flex;
+  height: calc(100vh - var(--header-height) - var(--space-6) * 2);
+  gap: 0;
+  overflow: hidden;
+}
+
+/* ── Panels ──────────────────────────────────────────────────────────────────*/
+.research-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.research-panel--left {
+  flex-shrink: 0;
+  border-right: 1px solid var(--color-neutral-200);
+  padding-right: var(--space-3);
+}
+
+.research-panel--right {
+  flex-shrink: 0;
+  border-left: 1px solid var(--color-neutral-200);
+  padding-left: var(--space-3);
+}
+
+.research-panel--center {
+  flex: 1;
+  padding: 0 var(--space-4);
+}
+
+.research-panel--collapsed {
+  display: none;
+}
+
+/* Panel headers */
+.research-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+
+.research-panel-title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-neutral-500);
+  margin: 0;
+}
+
+.research-panel-toggle {
+  border: 1px solid var(--color-neutral-200);
+  background: var(--surface-card);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-500);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.research-panel-toggle:hover {
+  color: var(--color-primary-600);
+  border-color: var(--color-primary-300);
+}
+
+/* Collapsed rail buttons (bring a hidden panel back) */
+.research-restore-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-right: var(--space-2);
+}
+
+/* ── Resize handles ──────────────────────────────────────────────────────────*/
+.research-resize-handle {
+  width: 6px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  transition: background var(--transition-fast);
+  margin: 0 2px;
+}
+
+.research-resize-handle:hover,
+.research-resize-handle--active {
+  background: var(--color-primary-300);
+}
+
+/* ── Scope chips (left panel) ────────────────────────────────────────────────*/
+.scope-chips {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-neutral-100);
+  margin-bottom: var(--space-3);
+}
+
+.scope-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.scope-chip {
+  border: 1px solid var(--color-neutral-200);
+  background: var(--surface-card);
+  border-radius: var(--radius-full);
+  padding: 2px var(--space-2);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-600);
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-chip[aria-pressed='true'] {
+  background: var(--color-primary-100);
+  border-color: var(--color-primary-300);
+  color: var(--color-primary-800);
+  font-weight: var(--font-weight-medium);
+}
+
+.scope-chip-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* Conversation history reuses the ask-conversation-item styles */
+.research-conversations {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* ── Center: transcript ──────────────────────────────────────────────────────*/
+.research-transcript {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+  background: var(--surface-card);
+}
+
+.research-input-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.research-input-row textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 56px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-800);
+}
+
+/* ── Evidence panel (right) ──────────────────────────────────────────────────*/
+.research-evidence {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--surface-card);
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-700);
+}
+
+.research-evidence-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-bottom: var(--space-2);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-neutral-100);
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-500);
+}
+
+.research-evidence-meta a {
+  color: var(--color-primary-600);
+  text-decoration: none;
+}
+
+.research-evidence-meta a:hover {
+  text-decoration: underline;
+}
+
+.research-evidence-text {
+  white-space: pre-wrap;
+  line-height: var(--line-height-loose);
+}
+
+.research-evidence-text mark {
+  background: hsl(48, 95%, 72%);
+  color: inherit;
+  border-radius: 2px;
+}
+
+/* ── Responsive (§6.5/§6.12) ─────────────────────────────────────────────────*/
+/* 1024–1279px: left panel becomes a slide-out drawer (toggle rail). */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .research-panel--left {
+    position: fixed;
+    top: var(--header-height);
+    bottom: 0;
+    left: 0;
+    z-index: 60;
+    background: var(--surface-card);
+    padding: var(--space-4);
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-100%);
+    transition: transform var(--transition-base);
+    width: min(320px, 85vw) !important;
+  }
+
+  .research-panel--left.research-drawer-open {
+    transform: translateX(0);
+  }
+
+  .research-drawer-trigger-css {
+    display: inline-flex;
+    position: fixed;
+    left: 0.75rem;
+    bottom: 0.75rem;
+    z-index: 70;
+  }
+}
+
+.research-drawer-trigger-css {
+  display: none;
+}

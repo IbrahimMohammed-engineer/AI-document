@@ -511,3 +511,17 @@
   border-radius: var(--radius-md);
   background: hsl(0 72% 98%);
 }
+
+/* Phase 15 — "View source" buttons on ChangeItem sides. */
+.comparison-change-item__side-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.comparison-change-item__source-btn {
+  font-size: var(--font-size-xs);
+  padding: 1px var(--space-2);
+  text-decoration: none;
+}

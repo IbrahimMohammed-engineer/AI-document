@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import selectinload
 
 from app.models.user import AuditLog, RefreshToken
@@ -92,3 +92,56 @@ class AuditLogRepository(BaseRepository[AuditLog]):
             user_agent=user_agent,
         )
         return await self.add(entry)
+
+    async def list_by_org(
+        self,
+        organization_id: str | UUID,
+        *,
+        action: str | None = None,
+        resource_type: str | None = None,
+        user_id: str | UUID | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[tuple[AuditLog, str | None]], int]:
+        """Filtered, newest-first audit-log page for GET /audit-logs (Phase 15).
+
+        Org-isolated by construction (the org always comes from the JWT).
+        ``user_email`` is resolved with a single LEFT JOIN at read time —
+        emails are never denormalized into the stored audit row.
+
+        Returns:
+            (list of (entry, user_email) tuples newest-first, total matching)
+        """
+        from app.models.user import User as UserModel
+
+        conditions = [AuditLog.organization_id == str(organization_id)]
+        if action:
+            conditions.append(AuditLog.action == action.upper())
+        if resource_type:
+            conditions.append(AuditLog.resource_type == resource_type)
+        if user_id:
+            conditions.append(AuditLog.user_id == str(user_id))
+        if date_from is not None:
+            conditions.append(AuditLog.created_at >= date_from)
+        if date_to is not None:
+            conditions.append(AuditLog.created_at <= date_to)
+
+        total_result = await self._session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(*conditions)
+        )
+        total = int(total_result.scalar_one())
+
+        result = await self._session.execute(
+            select(AuditLog, UserModel.email)
+            .outerjoin(UserModel, AuditLog.user_id == UserModel.id)
+            .where(*conditions)
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        items = [(entry, email) for entry, email in result.all()]
+        return items, total

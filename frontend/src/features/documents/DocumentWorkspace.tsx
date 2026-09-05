@@ -1,43 +1,42 @@
-/**
- * DocumentWorkspace — the document detail screen (FE §6, Phases 5–6 slice).
+﻿/**
+ * DocumentWorkspace — the document detail screen (Phases 5–6 + Phase 15).
  *
- * Phase 5 scope (roadmap frontend work):
- *  - Document header + pipeline step-tracker (real EXTRACTING/OCR steps)
- *  - Basic viewer rendering the original file via signed URL (PDF in an
- *    embedded frame; other types fall back to a download card — FE §13
- *    groundwork; the deepened viewer lands with the full workspace)
- *  - Extracted-pages panel with per-page OCR flags and the partial-OCR
- *    warning surface (page-level "OCR failed" markers from the backend)
+ * Phase 15 (§6.4) upgrades over the Phase 5/6 slice:
+ *  - PDF.js viewer (canvas + text layer) replaces the signed-URL <iframe>
+ *  - Version selector (`?version=N`) — switching reloads viewer, pages, TOC
+ *  - In-document search (Ctrl+F/⌘F) with F3/Shift+F3 match stepping
+ *  - TOC scrollspy driven by the viewer's current page
+ *  - Zoom controls (fit-width / fit-page / 50–150%)
+ *  - 403 renders <PermissionDenied> (state matrix FE §18)
  *
- * Phase 6 scope:
- *  - TOC panel rendering the real section tree, with the "No structure
- *    detected" empty state and page-navigation fallback (FE §6.5)
- *
- * Phase 10 scope (citation navigation, FE §6.7/§12):
- *  - `?page=N&q=<quoted span>` deep link from a CitationBadge/CitationList:
- *    the cited page auto-expands, scrolls into view, and the exact quoted
- *    span renders with a persistent source-highlight overlay (text-offset
- *    based — the same real source text the backend persisted).
- *
- * Search-inside deepens in later phases on this skeleton.
+ * Retained from prior phases: pipeline step-tracker, extracted-pages panel
+ * with partial-OCR warning, `?page=N&q=` citation deep links, Summary and
+ * Extractions entry points.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
+import { PermissionDenied } from '@/components/PermissionDenied'
 import {
+  DocumentSearchBar,
   ProcessingStatusBadge,
   ProcessingStatusTracker,
+  PdfViewer,
   TocPanel,
 } from '@/features/documents'
 import {
   useDocument,
   useDocumentPages,
   useDocumentToc,
+  useDocumentVersions,
   useSignedUrl,
 } from '@/hooks/queries/useDocuments'
 import { useDocumentConflictSections } from '@/hooks/queries/useConflicts'
-import type { DocumentPageItem } from '@/lib/api/documents'
+import { ApiError } from '@/lib/api/client'
+import type { SearchMatch, ZoomMode } from '@/features/documents/PdfViewer'
+import type { DocumentDetail, DocumentPageItem } from '@/lib/api/documents'
+import './pdfViewer.css'
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -45,24 +44,92 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+/** Parse `?page=N` defensively — deep links are untrusted input (§10). */
+function parsePageParam(raw: string | null): number | null {
+  if (raw == null) return null
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 100_000 ? parsed : null
+}
+
 export function DocumentWorkspace() {
   const { id } = useParams<{ id: string }>()
   const documentId = id ?? null
-  const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
 
-  // Citation deep-link (FE §12): ?page=N&q=<quoted span> — the cited page
-  // expands with a persistent highlight overlay on the exact source span.
-  const focusPage = (() => {
-    const raw = searchParams.get('page')
-    const parsed = raw != null ? Number.parseInt(raw, 10) : Number.NaN
+  // Citation deep-link (FE §12): ?page=N&q=<quoted span>
+  const focusPage = parsePageParam(searchParams.get('page'))
+  const highlightText = searchParams.get('q')
+  // Version switching (Phase 15 §6.4.2): ?version=N (null = current)
+  const versionParam = (() => {
+    const raw = searchParams.get('version')
+    if (raw == null) return null
+    const parsed = Number.parseInt(raw, 10)
     return Number.isFinite(parsed) && parsed >= 1 ? parsed : null
   })()
-  const highlightText = searchParams.get('q')
 
-  const { data: document, isLoading, isError } = useDocument(documentId)
-  const { data: pagesData } = useDocumentPages(documentId)
-  const versionStatus = document?.current_version?.status
+  const { data: document, isLoading, isError, error } = useDocument(documentId)
+
+  // 403 → explicit permission-denied state (never a generic error card)
+  if (isError && error instanceof ApiError && error.isForbidden) {
+    return <PermissionDenied message="You don't have access to this document." />
+  }
+
+  return (
+    <DocumentWorkspaceBody
+      documentId={documentId}
+      doc={document ?? null}
+      isLoading={isLoading}
+      isError={isError}
+      focusPage={focusPage}
+      highlightText={highlightText}
+      versionParam={versionParam}
+      onVersionChange={(version) => {
+        const next = new URLSearchParams(searchParams)
+        next.set('version', String(version))
+        next.delete('page')
+        next.delete('q')
+        setSearchParams(next)
+      }}
+      onJumpToPage={(page, q) => {
+        const next = new URLSearchParams(searchParams)
+        next.set('page', String(page))
+        if (q) next.set('q', q)
+        else next.delete('q')
+        setSearchParams(next)
+      }}
+    />
+  )
+}
+
+function DocumentWorkspaceBody({
+  documentId,
+  doc,
+  isLoading,
+  isError,
+  focusPage,
+  highlightText,
+  versionParam,
+  onVersionChange,
+  onJumpToPage,
+}: {
+  documentId: string | null
+  doc: DocumentDetail | null
+  isLoading: boolean
+  isError: boolean
+  focusPage: number | null
+  highlightText: string | null
+  versionParam: number | null
+  onVersionChange: (version: number) => void
+  onJumpToPage: (page: number, q?: string) => void
+}) {
+  const navigate = useNavigate()
+  const versionsQuery = useDocumentVersions(documentId)
+
+  const { data: pagesData } = useDocumentPages(documentId, {
+    version: versionParam ?? undefined,
+    refetchWhileProcessing: versionParam == null,
+  })
+  const versionStatus = doc?.current_version?.status
   const pipelineActive =
     versionStatus != null &&
     versionStatus !== 'READY' &&
@@ -70,14 +137,86 @@ export function DocumentWorkspace() {
     versionStatus !== 'UPLOADED'
   const { data: tocData, isLoading: tocLoading } = useDocumentToc(documentId, {
     pipelineActive,
+    version: versionParam ?? undefined,
   })
   // Phase 13 — unresolved-conflict markers in the TOC (FE §6.5 `[•]`)
   const { conflictSectionIds } = useDocumentConflictSections(documentId)
 
-  if (isLoading) {
-    return <div className="page-loading">Loading document…</div>
+  // ── Viewer state ──────────────────────────────────────────────────────────
+  const [currentPage, setCurrentPage] = useState(focusPage ?? 1)
+  const [totalPages, setTotalPages] = useState<number | null>(null)
+  const [zoom, setZoom] = useState<ZoomMode>('fit-width')
+
+  // In-document search state
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [matches, setMatches] = useState<SearchMatch[]>([])
+  const [matchIndex, setMatchIndex] = useState(-1)
+
+  function stepMatch(delta: 1 | -1) {
+    if (matches.length === 0) return
+    setMatchIndex((index) => {
+      const next = index + delta
+      if (next < 0) return matches.length - 1
+      if (next >= matches.length) return 0
+      return next
+    })
   }
-  if (isError || !document) {
+
+  // Ctrl+F / ⌘F opens the in-document search; F3/Shift+F3 step matches
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        setSearchOpen(true)
+      } else if (event.key === 'F3' && searchOpen) {
+        event.preventDefault()
+        if (event.shiftKey) stepMatch(-1)
+        else stepMatch(1)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchOpen, matches, matchIndex])
+
+  // Follow the active match across pages
+  useEffect(() => {
+    const match = matches[matchIndex]
+    if (match && match.page !== currentPage) {
+      setCurrentPage(match.page)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchIndex, matches])
+
+  const handleMatchesFound = useCallback((found: SearchMatch[]) => {
+    setMatches(found)
+    setMatchIndex(found.length > 0 ? 0 : -1)
+  }, [])
+
+  // After the initial deep-link page renders, run the ?q= highlight
+  const handleTextLayerReady = useCallback(() => {
+    if (highlightText && !searchTerm) {
+      setSearchTerm(highlightText)
+      setSearchOpen(true)
+    }
+  }, [highlightText, searchTerm])
+
+  const failedPages = useMemo(
+    () => (pagesData?.items ?? []).filter((p: DocumentPageItem) => p.ocr_failed),
+    [pagesData],
+  )
+  const partialOcr = failedPages.length > 0
+
+  if (isLoading) {
+    return (
+      <div aria-busy="true">
+        <div className="skeleton" style={{ height: '2rem', width: '40%', marginBottom: '1rem' }} />
+        <div className="skeleton" style={{ height: '24rem' }} />
+      </div>
+    )
+  }
+  if (isError || !doc) {
     return (
       <div className="card empty-state">
         <div className="empty-state-title">Document not found</div>
@@ -88,8 +227,8 @@ export function DocumentWorkspace() {
     )
   }
 
-  const failedPages = (pagesData?.items ?? []).filter((p) => p.ocr_failed)
-  const partialOcr = failedPages.length > 0
+  const versions = versionsQuery.data?.items ?? []
+  const isPdf = doc.current_version?.mime_type === 'application/pdf'
 
   return (
     <div className="document-workspace">
@@ -98,47 +237,67 @@ export function DocumentWorkspace() {
           <div className="workspace-breadcrumb">
             <Link to="/app/documents">Documents</Link>
             <span aria-hidden="true">/</span>
-            <span>{document.name}</span>
+            <span>{doc.name}</span>
           </div>
-          <h1 className="page-title">{document.name}</h1>
+          <h1 className="page-title" tabIndex={-1}>
+            {doc.name}
+          </h1>
           <p className="page-subtitle">
-            {document.document_type}
-            {document.department ? ` · ${document.department}` : ''}
-            {document.current_version &&
-              ` · v${document.current_version.version_number} · ${formatBytes(
-                document.current_version.file_size_bytes,
+            {doc.document_type}
+            {doc.department ? ` · ${doc.department}` : ''}
+            {doc.current_version &&
+              ` · v${doc.current_version.version_number} · ${formatBytes(
+                doc.current_version.file_size_bytes,
               )}`}
           </p>
         </div>
-        {document.current_version && (
+        {doc.current_version && (
           <ProcessingStatusBadge
-            status={document.current_version.status}
-            documentId={document.id}
+            status={doc.current_version.status}
+            documentId={doc.id}
           />
         )}
       </div>
 
-      {/* Phase 14 — action bar (FE §6.5): Summary is primary; Extractions
-          (a less-frequent, more specialized action) is a secondary entry so
-          the primary bar stays uncluttered. */}
+      {/* Phase 14 — action bar (FE §6.5) */}
       <div className="workspace-actions">
         <button
           type="button"
           className="btn btn-secondary btn-sm"
-          onClick={() => navigate(`/app/documents/${document.id}/summary`)}
+          onClick={() => navigate(`/app/documents/${doc.id}/summary`)}
         >
           Summary
         </button>
         <Link
-          to={`/app/documents/${document.id}/extractions`}
+          to={`/app/documents/${doc.id}/extractions`}
           className="btn btn-secondary btn-sm"
         >
           Extractions
         </Link>
+
+        {/* Phase 15 §6.4.2 — version selector */}
+        {versions.length > 1 && (
+          <div className="version-selector" style={{ marginLeft: 'auto' }}>
+            <label htmlFor="version-select">Version</label>
+            <select
+              id="version-select"
+              value={versionParam ?? doc.current_version?.version_number ?? ''}
+              onChange={(event) => onVersionChange(Number(event.target.value))}
+            >
+              {versions.map((version) => (
+                <option key={version.id} value={version.version_number}>
+                  v{version.version_number}
+                  {version.version_label ? ` — ${version.version_label}` : ''}
+                  {version.state ? ` (${version.state})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       <section className="card workspace-processing">
-        <ProcessingStatusTracker documentId={document.id} />
+        <ProcessingStatusTracker documentId={doc.id} />
       </section>
 
       {partialOcr && (
@@ -154,10 +313,57 @@ export function DocumentWorkspace() {
       )}
 
       <div className="workspace-grid">
-        <DocumentViewer
-          documentId={document.id}
-          mimeType={document.current_version?.mime_type}
-        />
+        <section className="card workspace-viewer" aria-label="Document viewer">
+          <div className="workspace-viewer-head">
+            <h2 className="section-title">Original file</h2>
+            <ViewerToolbar
+              isPdf={isPdf}
+              currentPage={currentPage}
+              totalPages={totalPages}
+              onPageChange={setCurrentPage}
+              zoom={zoom}
+              onZoomChange={setZoom}
+            />
+          </div>
+
+          {searchOpen && (
+            <div style={{ marginBottom: '0.5rem' }}>
+              <DocumentSearchBar
+                open={searchOpen}
+                query={searchTerm}
+                onQueryChange={(query) => {
+                  setSearchTerm(query)
+                  setMatchIndex(-1)
+                }}
+                matchCount={matches.length}
+                matchIndex={matchIndex}
+                onPrev={() => stepMatch(-1)}
+                onNext={() => stepMatch(1)}
+                onClose={() => {
+                  setSearchOpen(false)
+                  setSearchTerm('')
+                  setMatches([])
+                  setMatchIndex(-1)
+                }}
+              />
+            </div>
+          )}
+
+          <ViewerBody
+            documentId={documentId}
+            isPdf={isPdf}
+            versionParam={versionParam}
+            currentPage={currentPage}
+            onPageChange={setCurrentPage}
+            onTotalPages={setTotalPages}
+            searchTerm={searchOpen || searchTerm ? searchTerm : ''}
+            matchIndex={matchIndex}
+            onMatchesFound={handleMatchesFound}
+            zoom={zoom}
+            onTextLayerReady={handleTextLayerReady}
+          />
+        </section>
+
         <div className="workspace-side">
           <TocPanel
             items={tocData?.items ?? []}
@@ -165,6 +371,11 @@ export function DocumentWorkspace() {
             sectionCount={tocData?.section_count ?? 0}
             isLoading={tocLoading}
             conflictSectionIds={conflictSectionIds}
+            currentPage={currentPage}
+            onSectionClick={(startPage) => {
+              setCurrentPage(startPage)
+              onJumpToPage(startPage)
+            }}
           />
           <PagesPanel
             pages={pagesData?.items ?? []}
@@ -179,78 +390,145 @@ export function DocumentWorkspace() {
   )
 }
 
-// ─── Viewer (signed-URL groundwork, FE §13) ───────────────────────────────────
+// ─── Viewer toolbar (zoom + page status) ──────────────────────────────────────
 
-function DocumentViewer({
-  documentId,
-  mimeType,
+function ViewerToolbar({
+  isPdf,
+  currentPage,
+  totalPages,
+  onPageChange,
+  zoom,
+  onZoomChange,
 }: {
-  documentId: string
-  mimeType?: string
+  isPdf: boolean
+  currentPage: number
+  totalPages: number | null
+  onPageChange: (page: number) => void
+  zoom: ZoomMode
+  onZoomChange: (zoom: ZoomMode) => void
 }) {
-  const [frameKey, setFrameKey] = useState(0)
-  const { data: signed, isLoading, isError, refetch } = useSignedUrl(documentId)
-  const isPdf = mimeType === 'application/pdf'
+  if (!isPdf) return null
+  return (
+    <div className="viewer-toolbar">
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm"
+        onClick={() => onPageChange(Math.max(1, currentPage - 1))}
+        disabled={currentPage <= 1}
+        aria-label="Previous page (left arrow)"
+      >
+        ←
+      </button>
+      <span className="viewer-page-status" aria-live="polite">
+        {currentPage}
+        {totalPages ? ` / ${totalPages}` : ''}
+      </span>
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm"
+        onClick={() => onPageChange(totalPages ? currentPage + 1 : currentPage)}
+        disabled={totalPages != null && currentPage >= totalPages}
+        aria-label="Next page (right arrow)"
+      >
+        →
+      </button>
+      <select
+        aria-label="Zoom"
+        value={String(zoom)}
+        onChange={(event) => {
+          const value = event.target.value
+          onZoomChange(
+            value === 'fit-width' || value === 'fit-page'
+              ? value
+              : Number(value),
+          )
+        }}
+      >
+        <option value="fit-width">Fit width</option>
+        <option value="fit-page">Fit page</option>
+        <option value="0.5">50%</option>
+        <option value="0.75">75%</option>
+        <option value="1">100%</option>
+        <option value="1.25">125%</option>
+        <option value="1.5">150%</option>
+      </select>
+    </div>
+  )
+}
+
+// ─── Viewer body (PDF.js vs fallback) ─────────────────────────────────────────
+
+function ViewerBody({
+  documentId,
+  isPdf,
+  versionParam,
+  currentPage,
+  onPageChange,
+  onTotalPages,
+  searchTerm,
+  matchIndex,
+  onMatchesFound,
+  zoom,
+  onTextLayerReady,
+}: {
+  documentId: string | null
+  isPdf: boolean
+  versionParam: number | null
+  currentPage: number
+  onPageChange: (page: number) => void
+  onTotalPages: (total: number) => void
+  searchTerm: string
+  matchIndex: number
+  onMatchesFound: (matches: SearchMatch[]) => void
+  zoom: ZoomMode
+  onTextLayerReady: () => void
+}) {
+  const {
+    data: signed,
+    isLoading,
+    isError,
+    refetch,
+  } = useSignedUrl(documentId, { version: versionParam ?? undefined })
+
+  if (!isPdf) {
+    return (
+      <div className="viewer-placeholder">
+        Inline preview for this file type arrives with the full workspace.
+        Download the original to view it.
+      </div>
+    )
+  }
+
+  if (isLoading) {
+    return <div className="viewer-placeholder">Signing download link…</div>
+  }
+  if (isError || !signed) {
+    return (
+      <div className="viewer-placeholder viewer-placeholder--error">
+        Could not sign the file URL.{' '}
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          onClick={() => void refetch()}
+        >
+          Try again
+        </button>
+      </div>
+    )
+  }
 
   return (
-    <section className="card workspace-viewer" aria-label="Document viewer">
-      <div className="workspace-viewer-head">
-        <h2 className="section-title">Original file</h2>
-        {isPdf && (
-          <div className="workspace-viewer-actions">
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => {
-                void refetch()
-                setFrameKey((k) => k + 1)
-              }}
-            >
-              Refresh link
-            </button>
-            {signed && (
-              <a
-                className="btn btn-secondary btn-sm"
-                href={signed.url}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open in new tab
-              </a>
-            )}
-          </div>
-        )}
-      </div>
-
-      {isPdf ? (
-        isLoading ? (
-          <div className="viewer-placeholder">Signing download link…</div>
-        ) : isError || !signed ? (
-          <div className="viewer-placeholder viewer-placeholder--error">
-            Could not sign the file URL.{' '}
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => void refetch()}
-            >
-              Try again
-            </button>
-          </div>
-        ) : (
-          <iframe
-            key={frameKey}
-            src={signed.url}
-            title="Document viewer"
-            className="viewer-frame"
-          />
-        )
-      ) : (
-        <div className="viewer-placeholder">
-          Inline preview for this file type arrives with the full workspace.
-          Download the original to view it.
-        </div>
-      )}
-    </section>
+    <PdfViewer
+      url={signed.url}
+      page={currentPage}
+      onPageChange={onPageChange}
+      onTotalPages={onTotalPages}
+      searchTerm={searchTerm}
+      activeMatchIndex={matchIndex}
+      onMatchesFound={onMatchesFound}
+      zoom={zoom}
+      onTextLayerReady={onTextLayerReady}
+    />
   )
 }
 

@@ -1,0 +1,295 @@
+/* Settings feature (Phase 15 §6.9) — token colors only. */
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: var(--space-8);
+  align-items: start;
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  position: sticky;
+  top: 0;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-neutral-600);
+  text-decoration: none;
+  transition: all var(--transition-fast);
+}
+
+.settings-nav-item:hover {
+  background: var(--color-primary-50);
+  color: var(--color-primary-700);
+}
+
+.settings-nav-item.active {
+  background: var(--color-primary-100);
+  color: var(--color-primary-800);
+}
+
+.settings-nav-icon {
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.settings-content {
+  min-width: 0;
+}
+
+/* ── Forms ───────────────────────────────────────────────────────────────────*/
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 480px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.settings-field label {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-neutral-700);
+}
+
+.settings-field input {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-800);
+  background: var(--surface-card);
+}
+
+.settings-field input:focus-visible {
+  outline: 2px solid var(--color-primary-400);
+  outline-offset: 1px;
+  border-color: var(--color-primary-400);
+}
+
+.settings-field input[readonly] {
+  background: var(--color-neutral-50);
+  color: var(--color-neutral-500);
+  cursor: not-allowed;
+}
+
+.settings-field-hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-400);
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.settings-status {
+  font-size: var(--font-size-sm);
+}
+
+.settings-status--ok {
+  color: var(--color-success);
+}
+
+.settings-status--error {
+  color: var(--color-error);
+}
+
+.settings-placeholder-list {
+  margin: var(--space-3) auto 0;
+  text-align: left;
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: var(--color-neutral-500);
+  font-size: var(--font-size-sm);
+}
+
+/* ── Tables (Users, Audit Log) ───────────────────────────────────────────────*/
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.settings-table th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 2px solid var(--color-neutral-200);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-neutral-500);
+}
+
+.settings-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-neutral-100);
+  color: var(--color-neutral-700);
+  vertical-align: middle;
+}
+
+.settings-table tbody tr:hover {
+  background: var(--color-neutral-50);
+}
+
+.role-badge {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--color-primary-100);
+  color: var(--color-primary-800);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  margin-right: var(--space-1);
+}
+
+.settings-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-500);
+}
+
+/* ── Filter bar (Audit Log) ──────────────────────────────────────────────────*/
+.settings-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-end;
+  margin-bottom: var(--space-4);
+}
+
+.settings-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.settings-filter-field label {
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-500);
+}
+
+.settings-filter-field select,
+.settings-filter-field input {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-800);
+  background: var(--surface-card);
+}
+
+/* ── Role permission display (RolesPage) ─────────────────────────────────────*/
+.role-card {
+  margin-bottom: var(--space-3);
+}
+
+.role-permissions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.permission-key {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-neutral-100);
+  color: var(--color-neutral-600);
+  font-family: ui-monospace, 'Cascadia Mono', monospace;
+  font-size: var(--font-size-xs);
+}
+
+/* ── Modal (role assignment) ─────────────────────────────────────────────────*/
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+.modal {
+  background: var(--surface-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  width: 440px;
+  max-width: 100%;
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.modal-title {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-neutral-800);
+  margin: 0;
+}
+
+.modal-role-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+
+.modal-role-row label {
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-700);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* ── Mobile: tab bar on top ──────────────────────────────────────────────────*/
+@media (max-width: 767px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-neutral-200);
+  }
+
+  .settings-nav-item {
+    white-space: nowrap;
+  }
+}

@@ -15,6 +15,10 @@ import { queryClient } from '@/lib/query/client'
 import { App } from './App'
 import './index.css'
 
+// NOTE: the PDF.js GlobalWorkerOptions.workerSrc assignment lives in
+// PdfViewer.tsx (lazy route chunk) — configuring it here would pull the
+// entire pdfjs-dist library into the initial bundle (§6.14 performance).
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>

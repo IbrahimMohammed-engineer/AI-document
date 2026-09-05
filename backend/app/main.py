@@ -244,6 +244,11 @@ def create_app() -> FastAPI:
     from app.api.analytics import router as analytics_router
     app.include_router(analytics_router)
 
+    # Phase 15 — Settings (profile, org, users, roles) + audit-log read
+    from app.api.settings import audit_router, router as settings_router
+    app.include_router(settings_router)
+    app.include_router(audit_router)
+
     return app
 
 

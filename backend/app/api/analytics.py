@@ -14,9 +14,9 @@ Access: ``analytics:read`` permission (seeded by migration 002; the FE
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -59,14 +59,38 @@ class AnalyticsSummaryResponse(BaseModel):
 async def get_analytics_summary(
     db: DbSession,
     user: Annotated[object, Depends(require_permission("analytics:read"))],
+    days: Annotated[
+        Optional[int],
+        Query(
+            ge=1,
+            le=3650,
+            description=(
+                "Restrict aggregates to the last N days (Phase 15 range "
+                "selector). Omit for the all-time aggregate (backward "
+                "compatible)."
+            ),
+        ),
+    ] = None,
 ) -> AnalyticsSummaryResponse:
     organization_id = user.organization_id  # type: ignore[attr-defined]
+
+    # Phase 15 range selector — a cutoff on message/document creation time.
+    # None keeps the historical all-time behaviour exactly as before.
+    message_cutoff = None
+    document_cutoff = None
+    if days is not None:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(tz=timezone.utc)
+        message_cutoff = now - timedelta(days=days)
+        document_cutoff = message_cutoff
 
     documents_result = await db.execute(
         select(func.count(Document.id)).where(
             Document.organization_id == organization_id,
             Document.deleted_at.is_(None),
             Document.status == "active",
+            *( [Document.created_at >= document_cutoff] if document_cutoff else [] ),
         )
     )
     document_count = int(documents_result.scalar_one())
@@ -80,6 +104,7 @@ async def get_analytics_summary(
                 )
             ),
             Message.role == "USER",
+            *( [Message.created_at >= message_cutoff] if message_cutoff else [] ),
         )
     )
     question_count = int(question_result.scalar_one())
@@ -91,6 +116,7 @@ async def get_analytics_summary(
         )
         .where(
             Message.role == "ASSISTANT",
+            *( [Message.created_at >= message_cutoff] if message_cutoff else [] ),
             Message.conversation_id.in_(
                 select(_conversation_table().id).where(
                     _conversation_table().organization_id == organization_id,
@@ -116,6 +142,7 @@ async def get_analytics_summary(
             Citation.message_id.in_(
                 select(Message.id).where(
                     Message.role == "ASSISTANT",
+                    *( [Message.created_at >= message_cutoff] if message_cutoff else [] ),
                     Message.conversation_id.in_(
                         select(_conversation_table().id).where(
                             _conversation_table().organization_id == organization_id,

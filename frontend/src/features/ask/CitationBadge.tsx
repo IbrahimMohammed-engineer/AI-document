@@ -15,8 +15,12 @@ import { SourcePreview } from './SourcePreview'
 
 export function CitationBadge({
   citation,
+  onCitationClick,
 }: {
   citation: AskCitation | null
+  /** Phase 15 Research Workspace: intercept the click (EvidencePanel sync)
+      instead of navigating away. */
+  onCitationClick?: (citation: AskCitation) => void
 }) {
   const navigate = useNavigate()
 
@@ -32,6 +36,10 @@ export function CitationBadge({
   const label = `Citation ${citation.index}: ${citation.document_name}, page ${citation.page}${citation.section ? `, ${citation.section}` : ''}`
 
   function openSource() {
+    if (onCitationClick) {
+      onCitationClick(citation!)
+      return
+    }
     const params = new URLSearchParams({
       page: String(citation!.page),
       q: citation!.text,

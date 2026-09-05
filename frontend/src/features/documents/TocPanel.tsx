@@ -1,15 +1,11 @@
 /**
  * TocPanel — the workspace table-of-contents panel (FE §6.5, Phase 6 slice).
  *
- * Renders the real `document_sections` tree produced by heuristic structure
- * detection. Per the frontend state matrix (FE §6.5 / FE §17):
- *  - Loading      → 5-line TOC skeleton
- *  - Empty        → "No structure detected for this document" with the
- *                   page-based-navigation fallback note (an explicitly
- *                   supported backend state, Backend §20)
- *  - Ready        → nested section tree; nodes show the section number and
- *                   the page span; click selects the section (jumping into
- *                   the viewer deepens with the full workspace, Phase 15)
+ * Phase 15 additions (§6.4.3):
+ *  - Scrollspy: the section whose `start_page`–`end_page` range contains the
+ *    viewer's current page is highlighted with `aria-current="true"` and the
+ *    active style as the PDF page changes.
+ *  - `onSectionClick(startPage)` fires on section click → the viewer jumps.
  */
 
 import { useState, type CSSProperties, type ReactNode } from 'react'
@@ -22,6 +18,8 @@ export function TocPanel({
   sectionCount,
   isLoading,
   conflictSectionIds,
+  currentPage,
+  onSectionClick,
 }: {
   items: TocNode[]
   hasStructure: boolean
@@ -29,9 +27,29 @@ export function TocPanel({
   isLoading: boolean
   /** Phase 13 — section labels with an unresolved conflict (FE §6.5 `[•]`). */
   conflictSectionIds?: Set<string>
+  /** Phase 15 scrollspy — the page currently shown in the viewer. */
+  currentPage?: number
+  /** Phase 15 — jump the viewer to a section's first page. */
+  onSectionClick?: (startPage: number) => void
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
-  const [selected, setSelected] = useState<string | null>(null)
+
+  /** Deepest node containing the current page (scrollspy winner). */
+  const activeNodeId = (() => {
+    if (currentPage == null) return null
+    let best: { id: string; level: number } | null = null
+    const visit = (node: TocNode) => {
+      const inRange =
+        currentPage >= node.start_page &&
+        (node.end_page == null || currentPage <= node.end_page)
+      if (inRange && (!best || node.level >= best.level)) {
+        best = { id: node.id, level: node.level }
+      }
+      node.children.forEach(visit)
+    }
+    items.forEach(visit)
+    return best ? (best as { id: string }).id : null
+  })()
 
   if (isLoading) return <TocSkeleton />
 
@@ -72,6 +90,7 @@ export function TocPanel({
     nodes.map((node) => {
       const isCollapsed = collapsed.has(node.id)
       const hasChildren = node.children.length > 0
+      const isActive = activeNodeId === node.id
       const pageSpan =
         node.end_page != null && node.end_page !== node.start_page
           ? `p. ${node.start_page}–${node.end_page}`
@@ -79,7 +98,7 @@ export function TocPanel({
       return (
         <li
           key={node.id}
-          className="toc-item"
+          className={`toc-item${isActive ? ' toc-item--active' : ''}`}
           style={{ '--toc-depth': depth } as CSSProperties}
         >
           <div className="toc-row">
@@ -102,13 +121,8 @@ export function TocPanel({
               type="button"
               className="toc-link"
               title={`Go to page ${node.start_page}`}
-              onClick={() => {
-                // Page-jump deepens with the full viewer (Phase 15); for
-                // now the section's page is in the title and the selection
-                // is announced to assistive tech via aria-current.
-                setSelected(node.id)
-              }}
-              aria-current={selected === node.id ? 'true' : undefined}
+              onClick={() => onSectionClick?.(node.start_page)}
+              aria-current={isActive ? 'true' : undefined}
             >
               {node.section_number && (
                 <span className="toc-number">{node.section_number}</span>

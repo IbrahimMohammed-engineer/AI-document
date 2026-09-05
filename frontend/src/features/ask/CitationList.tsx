@@ -12,12 +12,23 @@ import { useNavigate } from 'react-router-dom'
 import type { AskCitation } from '@/lib/api/ask'
 import { SourcePreview } from './SourcePreview'
 
-export function CitationList({ citations }: { citations: AskCitation[] }) {
+export function CitationList({
+  citations,
+  onCitationClick,
+}: {
+  citations: AskCitation[]
+  /** Phase 15 Research Workspace: intercept clicks (EvidencePanel sync). */
+  onCitationClick?: (citation: AskCitation) => void
+}) {
   const navigate = useNavigate()
 
   if (citations.length === 0) return null
 
   function openSource(citation: AskCitation) {
+    if (onCitationClick) {
+      onCitationClick(citation)
+      return
+    }
     const params = new URLSearchParams({
       page: String(citation.page),
       q: citation.text,

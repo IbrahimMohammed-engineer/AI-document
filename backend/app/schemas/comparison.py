@@ -89,6 +89,10 @@ class ComparisonResponse(_OrmBase):
     organization_id: str
     document_a_version_id: str
     document_b_version_id: str
+    # Phase 15 — resolved parent document IDs (document_versions.document_id)
+    # so the UI can build "View source" deep links without an extra lookup.
+    document_a_id: Optional[str] = None
+    document_b_id: Optional[str] = None
     status: str
     summary: Optional[ComparisonSummary] = None
     error_message: Optional[str] = None

@@ -17,9 +17,12 @@ const MARKER_INDEX = /\d{1,2}/
 export function CitedAnswer({
   text,
   citations,
+  onCitationClick,
 }: {
   text: string
   citations: AskCitation[]
+  /** Phase 15 Research Workspace: intercept badge clicks (EvidencePanel sync). */
+  onCitationClick?: (citation: AskCitation) => void
 }) {
   if (!text) return null
 
@@ -38,6 +41,7 @@ export function CitedAnswer({
               <CitationBadge
                 key={`${i}-${index}`}
                 citation={byIndex.get(index) ?? null}
+                onCitationClick={onCitationClick}
               />
             )
           }

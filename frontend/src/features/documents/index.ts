@@ -18,6 +18,9 @@ export { ProcessingIndicator } from './ProcessingIndicator'
 export { DocumentWorkspace } from './DocumentWorkspace'
 export { TocPanel } from './TocPanel'
 export { ComparisonPage } from './ComparisonPage'
+export { PdfViewer } from './PdfViewer'
+export { DocumentSearchBar } from './DocumentSearchBar'
+export { UploadDialog } from './UploadDialog'
 export {
   JOB_STATUS_LABELS,
   JOB_TYPE_LABELS,

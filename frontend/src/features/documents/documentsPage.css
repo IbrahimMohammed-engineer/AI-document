@@ -1,0 +1,114 @@
+/* Documents library page (Phase 15 §6.3). */
+
+.documents-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.documents-search {
+  flex: 1;
+  min-width: 220px;
+  max-width: 420px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-800);
+}
+
+.documents-filter-bar select {
+  padding: var(--space-2);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  background: var(--surface-card);
+  color: var(--color-neutral-800);
+}
+
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.view-toggle button {
+  padding: var(--space-1) var(--space-3);
+  border: none;
+  background: var(--surface-card);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-neutral-500);
+  cursor: pointer;
+}
+
+.view-toggle button.active {
+  background: var(--color-primary-100);
+  color: var(--color-primary-800);
+  font-weight: var(--font-weight-medium);
+}
+
+.documents-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-4);
+}
+
+.document-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-height: 130px;
+}
+
+.documents-name-link {
+  font-weight: var(--font-weight-medium);
+  color: var(--color-neutral-800);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.documents-name-link:hover {
+  color: var(--color-primary-600);
+  text-decoration: underline;
+}
+
+/* Upload dialog dropzone */
+.upload-dropzone {
+  border: 2px dashed var(--color-neutral-300);
+  border-radius: var(--radius-md);
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  text-align: center;
+  transition: all var(--transition-fast);
+  font-size: var(--font-size-xl);
+}
+
+.upload-dropzone--over {
+  border-color: var(--color-primary-400);
+  background: var(--color-primary-50);
+}
+
+/* Mobile — single-column cards */
+@media (max-width: 767px) {
+  .documents-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1279px) {
+  .documents-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

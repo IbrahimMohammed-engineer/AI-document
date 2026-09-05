@@ -141,8 +141,9 @@ async def test_full_auth_round_trip(app_client: AsyncClient, app_session_factory
     assert me_body["organization"]["slug"] == "acme"
     # First user is the bootstrap Admin → full permission set
     assert "user:manage" in me_body["permissions"]
-    # 9 base keys (migration 002) + conflict:resolve (migration 013)
-    assert len(me_body["permissions"]) == 10
+    # Full catalog: 9 base keys (migration 002) + conflict:resolve (013)
+    # + summary:regenerate + extraction:create (014) = 12 keys
+    assert len(me_body["permissions"]) == 12
 
     # Logout → new login via credentials
     logout = await app_client.post("/auth/logout")

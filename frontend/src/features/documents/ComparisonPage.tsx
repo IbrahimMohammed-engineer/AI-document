@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import './comparison.css'
 import {
@@ -150,18 +150,59 @@ function ComparisonSummaryCards({
 
 // ── Change item ───────────────────────────────────────────────────────────────
 
+function SourceButton({
+  label,
+  documentId,
+  chunkId,
+  pageNumber,
+  quote,
+}: {
+  label: string
+  documentId: string | null
+  chunkId: string | null
+  pageNumber?: number
+  quote: string | null
+}) {
+  if (!documentId || !chunkId) return null
+  const params = new URLSearchParams()
+  if (pageNumber != null) params.set('page', String(pageNumber))
+  if (quote) params.set('q', quote.slice(0, 120))
+  params.set('chunk', chunkId)
+  const suffix = params.toString() ? `?${params.toString()}` : ''
+  return (
+    <Link
+      to={`/app/documents/${documentId}${suffix}`}
+      className="btn btn-secondary btn-xs comparison-change-item__source-btn"
+      aria-label={`${label} — open the source in the document workspace`}
+    >
+      View source
+    </Link>
+  )
+}
+
 function ChangeItem({
   change,
+  documentAId,
+  documentBId,
 }: {
   change: {
     id: string
     change_type: string
     severity: string
     section: string | null
+    old_chunk_id?: string | null
+    new_chunk_id?: string | null
     old_text: string | null
     new_text: string | null
+    old_source?: { document_id: string; page_number: number } | null
+    new_source?: { document_id: string; page_number: number } | null
   }
+  documentAId?: string | null
+  documentBId?: string | null
 }) {
+  const oldDocId = change.old_source?.document_id ?? documentAId ?? null
+  const newDocId = change.new_source?.document_id ?? documentBId ?? null
+
   return (
     <div className="comparison-change-item">
       <div className="comparison-change-item__badges">
@@ -177,13 +218,31 @@ function ChangeItem({
           <div className="comparison-change-item__diff">
             {change.old_text && (
               <div className="comparison-change-item__side comparison-change-item__side--old">
-                <div className="comparison-change-item__side-label">Before</div>
+                <div className="comparison-change-item__side-label">
+                  Before
+                  <SourceButton
+                    label="View the old source"
+                    documentId={oldDocId}
+                    chunkId={change.old_chunk_id ?? null}
+                    pageNumber={change.old_source?.page_number}
+                    quote={change.old_text}
+                  />
+                </div>
                 {change.old_text}
               </div>
             )}
             {change.new_text && (
               <div className="comparison-change-item__side comparison-change-item__side--new">
-                <div className="comparison-change-item__side-label">After</div>
+                <div className="comparison-change-item__side-label">
+                  After
+                  <SourceButton
+                    label="View the new source"
+                    documentId={newDocId}
+                    chunkId={change.new_chunk_id ?? null}
+                    pageNumber={change.new_source?.page_number}
+                    quote={change.new_text}
+                  />
+                </div>
                 {change.new_text}
               </div>
             )}
@@ -201,12 +260,17 @@ function ComparisonChangeList({
   activeFilter,
   onFilterChange,
   anchorSection,
+  documentAId,
+  documentBId,
 }: {
   comparisonId: string
   activeFilter: ChangeSeverity | null
   onFilterChange: (f: ChangeSeverity | null) => void
   /** Phase 13 — section anchor from a conflict's "Compare Sources" (§22). */
   anchorSection?: string | null
+  /** Phase 15 — parent doc IDs for the "View source" buttons. */
+  documentAId?: string | null
+  documentBId?: string | null
 }) {
   const { data, isLoading } = useComparisonChanges(comparisonId, activeFilter ?? undefined)
   const anchored = useRef(false)
@@ -286,7 +350,11 @@ function ComparisonChangeList({
             id={isAnchor && !anchored.current ? 'comparison-anchor-target' : undefined}
             className={isAnchor ? 'comparison-change-item comparison-change-item--anchor' : undefined}
           >
-            <ChangeItem change={change} />
+            <ChangeItem
+              change={change}
+              documentAId={documentAId}
+              documentBId={documentBId}
+            />
           </div>
         )
       })}
@@ -476,7 +544,6 @@ function ComparisonDetail({ comparisonId }: { comparisonId: string }) {
   const [activeFilter, setActiveFilter] = useState<ChangeSeverity | null>(null)
   const [searchParams] = useSearchParams()
   const anchorSection = searchParams.get('section')
-
   if (!comparison) {
     return (
       <div className="comparison-status comparison-status--pending">
@@ -519,6 +586,8 @@ function ComparisonDetail({ comparisonId }: { comparisonId: string }) {
             activeFilter={activeFilter}
             onFilterChange={setActiveFilter}
             anchorSection={anchorSection}
+            documentAId={comparison.document_a_id}
+            documentBId={comparison.document_b_id}
           />
         </>
       )}

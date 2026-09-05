@@ -66,13 +66,19 @@ def _build_summary(comparison: object) -> Optional[ComparisonSummary]:
     )
 
 
-def _build_response(comparison: object, created: bool = False) -> ComparisonCreateResponse:
+def _build_response(
+    comparison: object,
+    created: bool = False,
+    document_ids: tuple[Optional[str], Optional[str]] = (None, None),
+) -> ComparisonCreateResponse:
     """Build a ComparisonCreateResponse from a DocumentComparison ORM instance."""
     return ComparisonCreateResponse(
         id=comparison.id,  # type: ignore[attr-defined]
         organization_id=comparison.organization_id,  # type: ignore[attr-defined]
         document_a_version_id=comparison.document_a_version_id,  # type: ignore[attr-defined]
         document_b_version_id=comparison.document_b_version_id,  # type: ignore[attr-defined]
+        document_a_id=document_ids[0],
+        document_b_id=document_ids[1],
         status=comparison.status,  # type: ignore[attr-defined]
         summary=_build_summary(comparison),
         error_message=comparison.error_message,  # type: ignore[attr-defined]
@@ -83,19 +89,53 @@ def _build_response(comparison: object, created: bool = False) -> ComparisonCrea
     )
 
 
-def _build_plain_response(comparison: object) -> ComparisonResponse:
+def _build_plain_response(
+    comparison: object,
+    document_ids: tuple[Optional[str], Optional[str]] = (None, None),
+) -> ComparisonResponse:
     """Build a ComparisonResponse (no ``created`` flag)."""
     return ComparisonResponse(
         id=comparison.id,  # type: ignore[attr-defined]
         organization_id=comparison.organization_id,  # type: ignore[attr-defined]
         document_a_version_id=comparison.document_a_version_id,  # type: ignore[attr-defined]
         document_b_version_id=comparison.document_b_version_id,  # type: ignore[attr-defined]
+        document_a_id=document_ids[0],
+        document_b_id=document_ids[1],
         status=comparison.status,  # type: ignore[attr-defined]
         summary=_build_summary(comparison),
         error_message=comparison.error_message,  # type: ignore[attr-defined]
         requested_by=comparison.requested_by,  # type: ignore[attr-defined]
         created_at=comparison.created_at,  # type: ignore[attr-defined]
         completed_at=comparison.completed_at,  # type: ignore[attr-defined]
+    )
+
+
+async def _resolve_document_ids(
+    db: AsyncSession,
+    comparison: object,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve both version IDs to their parent document IDs (Phase 15).
+
+    One query over document_versions → the "View source" deep links need the
+    document IDs to build /app/documents/{id}?chunk=... URLs.
+    """
+    from sqlalchemy import select
+
+    from app.models.document import DocumentVersion
+
+    version_ids = [
+        comparison.document_a_version_id,  # type: ignore[attr-defined]
+        comparison.document_b_version_id,  # type: ignore[attr-defined]
+    ]
+    result = await db.execute(
+        select(DocumentVersion.id, DocumentVersion.document_id).where(
+            DocumentVersion.id.in_(version_ids)
+        )
+    )
+    mapping = {row_id: document_id for row_id, document_id in result.all()}
+    return (
+        mapping.get(comparison.document_a_version_id),  # type: ignore[attr-defined]
+        mapping.get(comparison.document_b_version_id),  # type: ignore[attr-defined]
     )
 
 
@@ -229,11 +269,12 @@ async def initiate_comparison(
     # §13: 202 Accepted for a NEWLY created comparison (job enqueued);
     # 200 when an existing row is returned (nothing was recomputed).
     response.status_code = status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK
+    doc_ids = await _resolve_document_ids(db, comparison)
     logger.info(
         "POST /documents/compare: comparison=%s created=%s user=%s",
         comparison.id, created, user.id,  # type: ignore[attr-defined]
     )
-    return _build_response(comparison, created=created)
+    return _build_response(comparison, created=created, document_ids=doc_ids)
 
 
 # ── GET /documents/compare/{comparison_id} ─────────────────────────────────────
@@ -253,7 +294,8 @@ async def get_comparison(
     user: Annotated[object, Depends(require_permission("document:read"))],
 ) -> ComparisonResponse:
     comparison = await _get_authorized_comparison(comparison_id, user, db)
-    return _build_plain_response(comparison)
+    doc_ids = await _resolve_document_ids(db, comparison)
+    return _build_plain_response(comparison, document_ids=doc_ids)
 
 
 # ── GET /documents/compare/{comparison_id}/changes ─────────────────────────────
